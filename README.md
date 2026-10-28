@@ -1,6 +1,6 @@
 # Wintermute ESP32 — Metalio E-Ink 4
 
-基于 ESP-IDF 5.5.4 的显示、触摸与 SD 卡测试固件。
+基于 ESP-IDF 5.5.4 的显示、触摸、SD 卡与震动测试固件。
 硬件为 ESP32-S3、16 MB Flash、Octal PSRAM，屏幕为 SSD1677 / GDEM0397T81，800×480。
 显示接入 LVGL 9.5.0；触摸使用官方 CST816S 1.0.6 组件；SD 使用 IDF 的 SDMMC + FatFS。
 
@@ -15,6 +15,7 @@ drivers/                  驱动层：每种硬件独立文件夹，可复用
   cst816s_touch/          触摸原生采样、IRQ、事件队列
   tca9555/                IO 扩展器寄存器操作
   sdcard/                 SDMMC 1-bit 与 FAT 文件系统
+  vibration/              GPIO 马达脉冲、自动关闭与停止
 
 board/                    板级层：本板接线、上电顺序、设备创建
   include/board.h         统一板级入口
@@ -22,6 +23,7 @@ board/                    板级层：本板接线、上电顺序、设备创建
   board_i2c.c             共享 I2C 的内部初始化与恢复
   board_display.c         屏幕 SPI 和面板创建
   board_sdcard.c          本板 SD 卡挂载配置
+  board_vibration.c       本板马达引脚、极性和脉冲配置
 
 middleware/lvgl_port/     适配层：对应用统一提供 LVGL 初始化与全刷
   include/lvgl_port.h
@@ -48,7 +50,7 @@ tests/metalio/            无需设备的主机测试
 
 独立文件夹表示独立职责，不要求每个小文件都注册成一个组件。
 I2C 初始化、引脚配置、显示板级初始化均收在一个 `board` 组件；
-显示与触摸适配收在一个 `lvgl_port` 组件。工程共 4 个驱动组件、1 个板级组件、1 个适配组件。
+显示与触摸适配收在一个 `lvgl_port` 组件。工程共 5 个驱动组件、1 个板级组件、1 个适配组件。
 根 `CMakeLists.txt` 用 `EXTRA_COMPONENT_DIRS` 注册各目录。
 
 ## 常用入口
@@ -60,6 +62,8 @@ I2C 初始化、引脚配置、显示板级初始化均收在一个 `board` 组�
 | 初始化 LVGL 显示和触摸 | UI 任务内调用 `lvgl_port_init()` |
 | 请求全刷 | `lvgl_port_request_full_refresh()` |
 | 读取 BOOT 状态 | `board_boot_pressed()`，消抖和长短按由应用处理 |
+| 请求短震 / 停止 | `board_vibration_pulse(ms)` / `board_vibration_stop()` |
+| 读取马达输出状态 | `board_vibration_is_active()`，不代表检测到实际震动 |
 | 挂载 SD 并获取容量 | `board_sdcard_mount()` |
 | 访问文件 | `board_sdcard_path()` 获取路径，再使用标准文件 API |
 | 卸载 SD | 关闭所有文件后调用 `board_sdcard_unmount()` |
@@ -95,8 +99,9 @@ $env:Path = 'D:\Espressif\python_env\idf5.5_py3.11_env\Scripts;' + $env:Path
 - **NEXT +1 / RESET**：增加或清零计数，并改变进度条。
 - **FULL REFRESH**：强制全刷；四角 **TL/TR/BL/BR** 用于检查触摸方向。
 - 松手后显示最后的原生坐标与屏幕坐标。
-- **BOOT 短按**增加计数，**长按 1 秒**请求全刷。
+- **BOOT 短按**增加计数并触发 35 ms 短震，**长按 1 秒**请求全刷。
 - **SD 按钮**显示测试结果与卡容量，点击可重测。
+- **VIBE 35ms / VIBE 200ms / STOP**：短震、长一点的震动、立即停止；下方显示请求与输出状态。
 
 显示首帧全刷，后续变化局刷；10 次成功局刷后的下一次变化会全刷清残影。
 静止页面不反复刷新。刷屏、触摸采样、SD 测试各自执行，所有 LVGL API 都在 UI 任务调用。
@@ -118,13 +123,30 @@ SD 测试使用 FAT 卡，建议 FAT32；当前不启用 exFAT，不会自动格
 测试期间不要拔卡。成功卸载后可更换卡再点击重测；未实现热插拔检测。
 没有触摸或 SD 卡时，显示和 BOOT 测试仍可使用。
 
+## 震动测试与复用
+
+马达采用原项目的 **GPIO44、高有效、35 ms 默认脉冲**。配置集中在
+`config/board_config.h`；板级初始化在外设电源打开前尝试将马达输出置为关闭，启动不自动震动。
+驱动通过 `esp_timer` 自动关断，调用不等待脉冲结束，不阻塞 LVGL、触摸或 SD 任务。
+连续点击会从新请求时刻重新计时；单次上限为 1000 ms，超限返回错误，不提供无限常开接口。
+
+验收方法：点击 35 ms，应感到一次短震；点击 200 ms，时长应明显增加；在 200 ms 期间点 STOP，
+应提前停止。重复点击后应在最后一次请求结束时停止。无触摸时可短按 BOOT 验证 35 ms。
+墨水屏显示比马达动作慢，短脉冲可能结束后才显示状态，以手感和串口日志一起判断。
+`OUTPUT OFF` 只表示软件已关闭 GPIO，板上没有震动反馈传感器，不能据此判定马达硬件通过。
+
+驱动不依赖板型、LVGL 或测试代码，复用时通过 `vibration_config_t` 传入引脚、有效极性、
+默认脉宽和上限；直接驱动 API `vibration_pulse(handle, 0)` 表示使用默认脉宽，停止使用
+`vibration_stop()`。当前实例与定时器常驻到重启，同一引脚只创建一个实例。
+默认固件增加震动测试；原始屏幕诊断仍只测试显示，马达保持关闭。
+
 ## 原始屏幕诊断
 
 `idf.py menuconfig` → `Wintermute display` → `Display application`，选择
 `Raw panel diagnostic (black/white/gray/partial)`。
 此模式依次显示白屏、黑屏、四灰阶、黑白测试图、5 次局刷计数，然后让面板休眠。
 短按 BOOT 重跑；结束日志为 `Display test complete. Press BOOT to run again.`。
-该模式不启动触摸或 SD 测试；切回 `LVGL display, touch and SD card test` 恢复默认固件。
+该模式不启动触摸、SD 或震动测试；切回 `LVGL display, touch, SD card and vibration test` 恢复默认固件。
 
 ## 接线与排查
 
@@ -138,6 +160,7 @@ SD 测试使用 FAT 卡，建议 FAT32；当前不启用 exFAT，不会自动格
 | 总电源 / 屏卡座电源 | TCA9555 P0.6 / P0.5 |
 | SD CLK / CMD / D0 / DAT3 | GPIO38 / GPIO40 / GPIO39 / GPIO46；1-bit、20 MHz |
 | BOOT | GPIO0，低有效 |
+| 马达开关 | GPIO44，高有效；默认 35 ms，最大单次 1000 ms |
 
 `BOARD_IO_*_MASK` 是 TCA9555 扩展口位，不能当成 ESP32 GPIO。
 GPIO46 仅输入上拉；USB MUX 保持调试通路；关机脉冲脚 P1.3 保持高。
@@ -156,8 +179,8 @@ cmake --build build/host-tests
 ctest --test-dir build/host-tests --output-on-failure
 ```
 
-主机测试覆盖触摸方向/边界、TCA9555 端口位保护/写入顺序/通信错误，以及 SD 测试文件的保护与清理。
-这些测试不代替实际触摸、SD 电气连接和屏幕视觉验收。
-可选的 `pytest_display.py` 硬件冒烟测试需要真实设备与 `pytest-embedded`，验证启动和显示流程完成日志。
+震动主机测试使用模拟 GPIO 和定时器，直接链接实际驱动，检查脉冲、自动关闭、停止、重触发、
+有效极性、参数与错误处理。硬件测试入口保留在默认 LVGL 测试页中。
+主机测试不代替实际震动手感、触摸响应、SD 电气连接和屏幕视觉验收。
 
 移植源为本地 `D:\Github\Metalio-E-INK4-main`；来源与许可见 `drivers/ssd1677/NOTICE.md`。

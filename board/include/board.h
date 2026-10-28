@@ -23,6 +23,15 @@ esp_err_t board_display_init(esp_lcd_panel_handle_t *panel);
 // BOOT 为低有效；board_init 成功后读取，消抖和按键动作由应用处理。
 bool board_boot_pressed(void);
 
+// 初始化马达输出为关闭状态，不产生启动震动；board_init 会调用，可串行重试。
+esp_err_t board_vibration_init(void);
+// 异步短震，到时自动关闭；0 使用板级默认时长，新脉冲替换当前脉冲。
+// 在 board_init 成功后调用；不允许超过板级单次时长上限。
+esp_err_t board_vibration_pulse(uint32_t duration_ms);
+esp_err_t board_vibration_stop(void);
+// 仅为驱动输出状态，不能判断马达是否实际转动或连接正常。
+bool board_vibration_is_active(void);
+
 typedef struct {
     uint16_t native_width;
     uint16_t native_height;

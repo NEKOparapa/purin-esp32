@@ -4,7 +4,7 @@ menu "Wintermute display"
         default WINTERMUTE_DISPLAY_LVGL
 
         config WINTERMUTE_DISPLAY_LVGL
-            bool "LVGL display, touch and SD card test"
+            bool "LVGL display, touch, SD card and vibration test"
 
         config WINTERMUTE_DISPLAY_DIAGNOSTIC
             bool "Raw panel diagnostic (black/white/gray/partial)"

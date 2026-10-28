@@ -18,6 +18,14 @@ void lvgl_demo_ui_set_full_refresh_cb(void (*cb)(void));
 void lvgl_demo_ui_set_sd_test_cb(void (*cb)(void));
 void lvgl_demo_ui_set_sd_status(const char *status);
 
+/* 三个震动按钮分别提交 35ms、200ms、0 请求。这里的 0 明确表示停止，
+ * 应用须调用 stop 接口，不能将其当成驱动的默认脉宽。
+ */
+void lvgl_demo_ui_set_vibration_cb(void (*cb)(uint32_t duration_ms));
+
+/* 仅显示软件命令/输出状态；没有物理反馈传感器，不能据此确认马达实际震动。 */
+void lvgl_demo_ui_set_vibration_status(const char *status);
+
 /* 更新触摸硬件状态；不可用时仍保留 BOOT 操作。 */
 void lvgl_demo_ui_set_touch_available(bool available);
 

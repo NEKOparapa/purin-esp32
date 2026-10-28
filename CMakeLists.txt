@@ -7,6 +7,7 @@ set(EXTRA_COMPONENT_DIRS
     "drivers/cst816s_touch"
     "drivers/tca9555"
     "drivers/sdcard"
+    "drivers/vibration"
     "middleware/lvgl_port"
 )
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

@@ -9,11 +9,14 @@ static lv_obj_t *level_bar;
 static lv_obj_t *touch_status_label;
 static lv_obj_t *coordinates_label;
 static lv_obj_t *sd_status_label;
+static lv_obj_t *vibration_status_label;
 static unsigned counter;
 static bool touch_available;
 static const char *last_target = "--";
 static void (*full_refresh_cb)(void);
 static void (*sd_test_cb)(void);
+static void (*vibration_cb)(uint32_t duration_ms);
+static const uint32_t vibration_durations[] = {35, 200, 0};
 
 /* 显式黑白样式：去掉主题渐变、按下动画和滚动，减少墨水屏无意义刷新。 */
 static void plain_object(lv_obj_t *obj, int x, int y, int width, int height)
@@ -125,6 +128,15 @@ static void on_sd_clicked(lv_event_t *event)
     }
 }
 
+static void on_vibration_clicked(lv_event_t *event)
+{
+    const uint32_t *duration_ms = lv_event_get_user_data(event);
+    if (vibration_cb && duration_ms) {
+        // 只提交请求，定时关断由底层执行；不在 LVGL 回调中等待震动结束。
+        vibration_cb(*duration_ms);
+    }
+}
+
 static void corner(lv_obj_t *screen, int x, int y, const char *id, const char *name)
 {
     lv_obj_t *obj = button(screen, x, y, 64, 48, id, name, false);
@@ -141,24 +153,24 @@ void lvgl_demo_ui_create(void)
     lv_obj_set_style_text_font(screen, &lv_font_montserrat_20, LV_PART_MAIN);
 
     label(screen, 92, 14, 616, "WINTERMUTE / HARDWARE TEST", &lv_font_montserrat_28);
-    label(screen, 92, 54, 616, "SSD1677 + CST816S + SDMMC / LVGL 9.5", &lv_font_montserrat_20);
+    label(screen, 92, 54, 616, "DISPLAY / TOUCH / SD / VIBRATION", &lv_font_montserrat_20);
     lv_obj_t *divider = lv_obj_create(screen);
     plain_object(divider, 24, 88, 752, 2);
     lv_obj_set_style_bg_color(divider, lv_color_black(), LV_PART_MAIN);
-    touch_status_label = label(screen, 24, 106, 752, "", &lv_font_montserrat_20);
+    touch_status_label = label(screen, 24, 100, 752, "", &lv_font_montserrat_20);
     lv_obj_set_user_data(touch_status_label, "touch_status");
     update_touch_status();
 
-    lv_obj_t *count_card = card(screen, 24, 142, 220, 150);
-    label(count_card, 14, 16, 188, "BUTTON EVENTS", &lv_font_montserrat_20);
-    counter_label = label(count_card, 12, 66, 192, "0000", &lv_font_montserrat_48);
+    lv_obj_t *count_card = card(screen, 24, 134, 220, 100);
+    label(count_card, 14, 10, 188, "BUTTON EVENTS", &lv_font_montserrat_20);
+    counter_label = label(count_card, 12, 42, 192, "0000", &lv_font_montserrat_48);
     lv_obj_set_user_data(counter_label, "counter");
     lv_obj_set_style_text_align(counter_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_t *widgets = card(screen, 268, 142, 508, 150);
-    level_label = label(widgets, 20, 16, 464, "LEVEL 0%", &lv_font_montserrat_20);
+    lv_obj_t *widgets = card(screen, 268, 134, 508, 100);
+    level_label = label(widgets, 20, 10, 464, "LEVEL 0%", &lv_font_montserrat_20);
     lv_obj_set_user_data(level_label, "level_text");
     level_bar = lv_bar_create(widgets);
-    plain_object(level_bar, 20, 58, 464, 28);
+    plain_object(level_bar, 20, 40, 464, 20);
     lv_obj_set_user_data(level_bar, "level_bar");
     lv_obj_set_style_border_color(level_bar, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_border_width(level_bar, 2, LV_PART_MAIN);
@@ -168,22 +180,31 @@ void lvgl_demo_ui_create(void)
     lv_obj_set_style_radius(level_bar, 0, LV_PART_INDICATOR);
     lv_bar_set_range(level_bar, 0, 100);
     lv_bar_set_value(level_bar, 0, LV_ANIM_OFF);
-    lv_obj_t *sd_button = button(widgets, 20, 100, 464, 38,
+    lv_obj_t *sd_button = button(widgets, 20, 64, 464, 28,
                                  "sd_test", "SD: CHECKING...", false);
     sd_status_label = lv_obj_get_child(sd_button, 0);
     lv_obj_set_user_data(sd_status_label, "sd_status");
     lv_obj_add_event_cb(sd_button, on_sd_clicked, LV_EVENT_CLICKED, NULL);
 
-    next_button = button(screen, 24, 312, 236, 64, "next", "NEXT +1", true);
+    next_button = button(screen, 24, 246, 236, 48, "next", "NEXT +1", true);
     lv_obj_add_event_cb(next_button, on_next_clicked, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *reset_button = button(screen, 282, 312, 236, 64, "reset", "RESET", false);
+    lv_obj_t *reset_button = button(screen, 282, 246, 236, 48, "reset", "RESET", false);
     lv_obj_add_event_cb(reset_button, on_reset_clicked, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *full_button = button(screen, 540, 312, 236, 64, "full", "FULL REFRESH", false);
+    lv_obj_t *full_button = button(screen, 540, 246, 236, 48, "full", "FULL REFRESH", false);
     lv_obj_add_event_cb(full_button, on_full_refresh_clicked, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *vibe_short = button(screen, 24, 306, 236, 48, "vibe_short", "VIBE 35ms", false);
+    lv_obj_add_event_cb(vibe_short, on_vibration_clicked, LV_EVENT_CLICKED, (void *)&vibration_durations[0]);
+    lv_obj_t *vibe_long = button(screen, 282, 306, 236, 48, "vibe_long", "VIBE 200ms", false);
+    lv_obj_add_event_cb(vibe_long, on_vibration_clicked, LV_EVENT_CLICKED, (void *)&vibration_durations[1]);
+    lv_obj_t *vibe_stop = button(screen, 540, 306, 236, 48, "vibe_stop", "STOP", false);
+    lv_obj_add_event_cb(vibe_stop, on_vibration_clicked, LV_EVENT_CLICKED, (void *)&vibration_durations[2]);
+    vibration_status_label = label(screen, 24, 366, 752, "VIBE: INITIALIZING...", &lv_font_montserrat_20);
+    lv_obj_set_user_data(vibration_status_label, "vibe_status");
 
     coordinates_label = label(screen, 92, 402, 616, "RAW --,--  >  SCREEN --,--", &lv_font_montserrat_20);
     lv_obj_set_user_data(coordinates_label, "coordinates");
-    label(screen, 92, 442, 616, "BOOT: next; hold 1s: full refresh", &lv_font_montserrat_20);
+    label(screen, 92, 442, 616, "BOOT: next + vibe; hold 1s: refresh", &lv_font_montserrat_20);
     /* 四角测试块覆盖不同屏幕边缘，便于判断交换坐标轴或镜像错误。 */
     corner(screen, 8, 8, "corner_tl", "TL");
     corner(screen, 728, 8, "corner_tr", "TR");
@@ -205,6 +226,18 @@ void lvgl_demo_ui_set_sd_status(const char *status)
 {
     if (sd_status_label && status) {
         lv_label_set_text(sd_status_label, status);
+    }
+}
+
+void lvgl_demo_ui_set_vibration_cb(void (*cb)(uint32_t duration_ms))
+{
+    vibration_cb = cb;
+}
+
+void lvgl_demo_ui_set_vibration_status(const char *status)
+{
+    if (vibration_status_label && status) {
+        lv_label_set_text(vibration_status_label, status);
     }
 }
 

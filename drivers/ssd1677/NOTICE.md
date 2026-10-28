@@ -25,6 +25,9 @@ The SD pin assignment and 1-bit wiring follow upstream
 `main/boards/common/storage/SdCardManager.hpp` and
 `main/boards/metalio-e-ink-4/periph/metalio_board_periph.cc`; the local
 `drivers/sdcard/` uses ESP-IDF's SDMMC and FatFS implementations.
+The vibration GPIO polarity and 35 ms default pulse follow upstream
+`main/boards/metalio-e-ink-4/config.h` and `input/metalio_vibe.cc`.
+The reusable `drivers/vibration/` implementation uses ESP-IDF GPIO and timers.
 
 Upstream's root license is MIT, copyright (c) 2026 CloudZao, reproduced in
 `LICENSE-Metalio-MIT`. The driver, command definitions, fast and partial lookup

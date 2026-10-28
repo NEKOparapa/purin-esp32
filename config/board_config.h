@@ -62,6 +62,9 @@
 #define BOARD_BOOT_GPIO              GPIO_NUM_0  // BOOT 按键，低有效
 #define BOARD_POWER_BUTTON_GPIO     GPIO_NUM_3  // 电源按键/开关机芯片信号
 #define BOARD_VIBRATION_GPIO         GPIO_NUM_44 // 震动马达，高有效
+#define BOARD_VIBRATION_ACTIVE_HIGH  1           // 板上马达开关高电平导通
+#define BOARD_VIBRATION_PULSE_MS     35          // 默认触感脉冲：35 ms，沿用原项目
+#define BOARD_VIBRATION_MAX_MS       1000        // 单次脉冲上限：1 秒，避免测试误常开
 
 /* SDMMC 使用 1-bit 模式；GPIO46 仅可输入，不要将 DAT3 配置成输出。 */
 #define BOARD_SDMMC_CLK_GPIO         GPIO_NUM_38 // SD 时钟
