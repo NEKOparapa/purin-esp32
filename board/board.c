@@ -25,7 +25,7 @@ esp_err_t board_init(void)
     if (initialized) {
         return ESP_OK;
     }
-    // 先将马达输出置为关闭，再打开外设电源；失败时保留其它硬件的测试能力。
+    // 先将马达输出置为关闭，再打开外设电源；失败时不阻断其余板级初始化。
     esp_err_t vibration_err = board_vibration_init();
     if (vibration_err != ESP_OK) {
         ESP_LOGW(TAG, "Vibration init failed: %s", esp_err_to_name(vibration_err));

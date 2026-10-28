@@ -1,4 +1,5 @@
 #include "epaper_lvgl.h"
+#include "epaper_frame.h"
 
 #include <string.h>
 #include "esp_check.h"
@@ -11,7 +12,7 @@
 #include "freertos/task.h"
 
 static const char *TAG = "epaper_lvgl";
-enum { WIDTH = 800, HEIGHT = 480, FRAME_BYTES = WIDTH * HEIGHT / 8,
+enum { FRAME_BYTES = EPAPER_FRAME_BYTES,
        PALETTE_BYTES = 8, MAX_PARTIAL_REFRESHES = 10 };
 
 typedef struct {
@@ -49,7 +50,7 @@ static esp_err_t reset_panel(void)
 static esp_err_t write_plane(const uint8_t *frame, esp_lcd_ssd1677_bitmap_color_t plane)
 {
     ESP_RETURN_ON_ERROR(epaper_panel_set_bitmap_color(ctx.panel, plane), TAG, "select plane");
-    return esp_lcd_panel_draw_bitmap(ctx.panel, 0, 0, WIDTH, HEIGHT, frame);
+    return esp_lcd_panel_draw_bitmap(ctx.panel, 0, 0, EPAPER_NATIVE_WIDTH, EPAPER_NATIVE_HEIGHT, frame);
 }
 
 static esp_err_t refresh_panel(bool full)
@@ -105,7 +106,7 @@ static void refresh_worker(void *arg)
             have_previous = false;
             needs_reset = true;
             partial_count = 0;
-            ESP_LOGE(TAG, "Refresh failed: %s. Next UI update / long BOOT retries with full refresh.",
+            ESP_LOGE(TAG, "Refresh failed: %s. Next UI update or full-refresh request retries the panel.",
                      esp_err_to_name(err));
             continue;
         }
@@ -122,15 +123,19 @@ static void flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *pixe
 {
     // FULL render mode gives exactly one full-screen I1 buffer, with two
     // 32-bit palette entries followed by MSB-first pixels (1=white, 0=black).
-    if (area->x1 != 0 || area->y1 != 0 || area->x2 != WIDTH - 1 || area->y2 != HEIGHT - 1) {
+    if (area->x1 != 0 || area->y1 != 0 ||
+        area->x2 != EPAPER_UI_WIDTH - 1 || area->y2 != EPAPER_UI_HEIGHT - 1) {
         ESP_LOGE(TAG, "Unexpected LVGL flush area; this port requires FULL render mode");
         lv_display_flush_ready(display);
         return;
     }
     xSemaphoreTake(ctx.pending_lock, portMAX_DELAY);
-    const uint8_t *src = pixels + PALETTE_BYTES;
-    for (int y = 0; y < HEIGHT; ++y) {
-        memcpy(ctx.pending_frame + y * (WIDTH / 8), src + y * ctx.draw_stride, WIDTH / 8);
+    // LVGL 使用竖屏坐标，硬件协议和新旧帧比较保持原生 800×480 坐标。
+    if (!epaper_frame_portrait_to_native(ctx.pending_frame, pixels + PALETTE_BYTES, ctx.draw_stride)) {
+        xSemaphoreGive(ctx.pending_lock);
+        ESP_LOGE(TAG, "Invalid portrait frame buffer/stride");
+        lv_display_flush_ready(display);
+        return;
     }
     ctx.pending = true;
     // A later coalesced frame must not erase an earlier full-refresh request.
@@ -150,8 +155,8 @@ esp_err_t epaper_lvgl_init(esp_lcd_panel_handle_t panel)
     ESP_RETURN_ON_ERROR(reset_panel(), TAG, "SSD1677 init");
     lv_init();
     lv_tick_set_cb(tick_ms);
-    ctx.draw_stride = lv_draw_buf_width_to_stride(WIDTH, LV_COLOR_FORMAT_I1);
-    const size_t draw_size = ctx.draw_stride * HEIGHT + PALETTE_BYTES;
+    ctx.draw_stride = lv_draw_buf_width_to_stride(EPAPER_UI_WIDTH, LV_COLOR_FORMAT_I1);
+    const size_t draw_size = ctx.draw_stride * EPAPER_UI_HEIGHT + PALETTE_BYTES;
     const uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     const size_t align = LV_DRAW_BUF_ALIGN > sizeof(void *) ? LV_DRAW_BUF_ALIGN : sizeof(void *);
     ctx.draw_buffer = heap_caps_aligned_alloc(align, draw_size, caps);
@@ -164,7 +169,7 @@ esp_err_t epaper_lvgl_init(esp_lcd_panel_handle_t panel)
         goto fail;
     }
     memset(ctx.draw_buffer, 0xff, draw_size);
-    ctx.display = lv_display_create(WIDTH, HEIGHT);
+    ctx.display = lv_display_create(EPAPER_UI_WIDTH, EPAPER_UI_HEIGHT);
     if (!ctx.display) {
         goto fail;
     }
@@ -175,7 +180,7 @@ esp_err_t epaper_lvgl_init(esp_lcd_panel_handle_t panel)
     if (xTaskCreate(refresh_worker, "epaper_refresh", 4096, NULL, 2, &ctx.worker) != pdPASS) {
         goto fail;
     }
-    ESP_LOGI(TAG, "LVGL %d.%d.%d ready: 800x480 I1, async panel worker",
+    ESP_LOGI(TAG, "LVGL %d.%d.%d ready: 480x800 portrait I1 -> 800x480 panel, async worker",
              LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH);
     return ESP_OK;
 

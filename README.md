@@ -1,81 +1,161 @@
 # Wintermute ESP32 — Metalio E-Ink 4
 
-基于 ESP-IDF 5.5.4 的显示、触摸、SD 卡与震动测试固件。
-硬件为 ESP32-S3、16 MB Flash、Octal PSRAM，屏幕为 SSD1677 / GDEM0397T81，800×480。
-显示接入 LVGL 9.5.0；触摸使用官方 CST816S 1.0.6 组件；SD 使用 IDF 的 SDMMC + FatFS。
+基于 ESP-IDF 5.5.4 的项目基础固件。启动后进入竖屏占位主页，支持 BOOT 长按持续录音。
+硬件为 ESP32-S3、16 MB Flash、Octal PSRAM、SSD1677 / GDEM0397T81 800×480 墨水屏。
+图形库为 LVGL 9.5.0，触摸使用官方 CST816S 1.0.6 组件。
 
-## 目录与职责
+## 启动与主页
+
+启动顺序：`app_main()` → `board_init()` → UI 任务 → `lvgl_port_init()` → `home_screen_create()`。
+主页采用 **480×800 竖屏**，显示 WINTERMUTE、HOME、Ready 等静态占位内容，使用已有英文字体。
+后续页面从 `main/ui/home_screen.c` 扩展。
+
+旧硬件测试页面、原始屏幕诊断、测试模式菜单及按键测试动作已移除。
+当前没有计数器、坐标展示、SD 读写测试或震动测试；BOOT 长按用于开始/停止录音。
+启动不挂载或写入 SD 卡，不触发震动；马达初始化保持关闭。
+触摸驱动与 LVGL 输入适配继续保留，主页暂时没有交互控件。
+
+首页首帧全刷，静止时不反复刷屏。所有 LVGL 调用在同一个 UI 任务执行，
+实际 SPI/BUSY 等待由独立刷新任务完成。显示适配层将竖屏 I1 画布旋转为控制器
+原生 800×480 帧后发送；屏幕驱动和波形仍使用原生寻址。
+串口 `Startup complete: home screen ready` 表示主页已创建；
+`Frame ... FULL complete` 表示面板刷新流程完成，实际画面仍需实物确认。
+
+## 分层目录
 
 ```text
-config/
-  board_config.h          板型配置：引脚、地址、时钟，中文注释
+config/board_config.h      中文注释的引脚、地址、频率、方向配置
 
-drivers/                  驱动层：每种硬件独立文件夹，可复用
+drivers/                  独立、可复用的硬件驱动
   ssd1677/                墨水屏协议与波形
-  cst816s_touch/          触摸原生采样、IRQ、事件队列
-  tca9555/                IO 扩展器寄存器操作
-  sdcard/                 SDMMC 1-bit 与 FAT 文件系统
-  vibration/              GPIO 马达脉冲、自动关闭与停止
+  cst816s_touch/          触摸采样和事件队列
+  tca9555/                IO 扩展器
+  sdcard/                 SDMMC 1-bit + FatFS
+  vibration/              马达脉冲与自动关断
+  i2s_microphone/         I2S 从机双路原始采集、短读与丢帧检测
 
-board/                    板级层：本板接线、上电顺序、设备创建
-  include/board.h         统一板级入口
-  board.c                 电源、触摸复位与初始化、BOOT
-  board_i2c.c             共享 I2C 的内部初始化与恢复
-  board_display.c         屏幕 SPI 和面板创建
-  board_sdcard.c          本板 SD 卡挂载配置
-  board_vibration.c       本板马达引脚、极性和脉冲配置
+board/                    本板供电、接线、总线和设备初始化
+  include/board.h         板级公开接口
 
-middleware/lvgl_port/     适配层：对应用统一提供 LVGL 初始化与全刷
+middleware/lvgl_port/     LVGL 显示与触摸适配
   include/lvgl_port.h
-  display/                墨水屏刷屏任务
-  input/                  触摸坐标变换、LVGL 输入适配
+  display/
+  input/
 
-main/                     应用层：不配置引脚、不拼装驱动
-  app_main.c              固件入口，仅选择应用模式
-  apps/                   硬件测试流程、原始屏幕诊断
-  ui/                     LVGL 测试页面
-  tests/                  SD 文件校验、显示测试图
+middleware/audio_capture/ 双麦混音、采集任务与 PCM 队列
+  include/audio_capture.h
+  include/audio_pcm.h     可独立使用的纯 PCM 混音运算
 
-tests/metalio/            无需设备的主机测试
+middleware/ogg_opus/      音频编码与容器，一个组件内按职责拆分
+  encoder/               PCM → 原始 Opus 包，无文件操作
+  muxer/                 Opus 包 → Ogg 页，通过回调输出字节
+  ogg_opus.c             连接编码/容器，负责普通文件打开、同步与关闭
+
+middleware/recording_storage/ PCM 分段保存与顺序索引
+  include/recording_writer.h
+  recording_writer.c     切片、周期同步、正常收尾与异常中止
+  recording_store.c      内部目录/文件命名、改名与索引提交
+
+main/                     应用层
+  app_main.c              初始化与 UI 任务
+  ui/home_screen.c        占位主页与静态录音状态
+  ui/home_screen.h
+  recording/             BOOT 判定、录音状态与模块协调
 ```
 
-边界约定：
+只有 `board` 的实现读取 `board_config.h`。驱动不依赖板型、LVGL 或应用；
+板级层不创建页面；适配层不包含业务界面。应用使用板级与图形接口。
+根 `CMakeLists.txt` 注册 6 个驱动、1 个板级和 4 个中间件组件。
 
-- **配置只由 `board` 读取**。应用不包含 `board_config.h`，不直接配置 GPIO、I2C 或 SPI。
-- **驱动不依赖板型、LVGL 或应用**。通过参数传入引脚和总线；换板时仍可复用。
-- **板级层组装硬件**。只处理设备与资源，不创建页面，不包含测试流程。
-- **LVGL 适配层接收板级设备**，使用驱动完成显示和输入适配；不包含业务页面。
-- **应用调用 `lvgl_port` 和 `board`**，负责按键行为、测试流程和结果显示。
-- 原始屏幕诊断为了验证波形/位平面，明确直接依赖 `ssd1677`；普通 LVGL 应用不依赖这些接口。
+录音数据流为：
 
-独立文件夹表示独立职责，不要求每个小文件都注册成一个组件。
-I2C 初始化、引脚配置、显示板级初始化均收在一个 `board` 组件；
-显示与触摸适配收在一个 `lvgl_port` 组件。工程共 5 个驱动组件、1 个板级组件、1 个适配组件。
-根 `CMakeLists.txt` 用 `EXTRA_COMPONENT_DIRS` 注册各目录。
+```text
+I2S 麦克风驱动
+    ↓ 原始左右 32-bit 样本
+audio_capture：等权混音 → PCM16 → 采集队列
+    ↓ 单声道 PCM 块
+recording_storage：按真实样本数分段
+    ↓
+ogg_opus：Opus 编码 → Ogg 封装 → 文件输出
+    ↓ 音频收尾、同步关闭
+recording_storage：改名 → 追加并同步顺序索引
+    ↓
+已挂载文件系统（由 board + SD 驱动提供）
+```
 
-## 常用入口
+`main/recording/recorder.c` 只协调板级准备、启停、PCM 块传递、同步时机与页面状态，
+五分钟是应用传给存储模块的策略。它不做混音、不计算切片、不接触 Ogg 或文件路径。
+`audio_capture` 接收借用的麦克风句柄，独占其 start/read/stop；不依赖 board、SD 或页面。
+`recording_storage` 接收已挂载路径和 PCM，可独立用于其他采样来源或文件系统，
+不依赖 I2S、采集队列、UI 或 SD 挂载。编码器和容器可通过回调连接其他输出，
+没有为这些内部模块各自增加任务或组件。
 
-| 需求 | 接口/位置 |
+底层接口继续保留，供后续业务使用：
+
+| 功能 | 接口 |
 | --- | --- |
-| 修改引脚、频率 | `config/board_config.h` |
-| 初始化板卡电源 | `board_init()` |
-| 初始化 LVGL 显示和触摸 | UI 任务内调用 `lvgl_port_init()` |
-| 请求全刷 | `lvgl_port_request_full_refresh()` |
-| 读取 BOOT 状态 | `board_boot_pressed()`，消抖和长短按由应用处理 |
-| 请求短震 / 停止 | `board_vibration_pulse(ms)` / `board_vibration_stop()` |
-| 读取马达输出状态 | `board_vibration_is_active()`，不代表检测到实际震动 |
-| 挂载 SD 并获取容量 | `board_sdcard_mount()` |
-| 访问文件 | `board_sdcard_path()` 获取路径，再使用标准文件 API |
-| 卸载 SD | 关闭所有文件后调用 `board_sdcard_unmount()` |
-| 修改测试页面 | `main/ui/lvgl_demo_ui.c` |
+| 请求全刷 | `lvgl_port_request_full_refresh()`，仅 UI 任务调用 |
+| AI / BOOT 键状态 | `board_boot_pressed()`，GPIO0，应用消抖后长按 2 秒切换录音 |
+| 麦克风准备 | `board_microphone_init()`，停止采集后调用，返回借用句柄 |
+| 录音控制 | `recorder_start()`、`recorder_stop()`，非阻塞；`recorder_get_status()` 获取快照 |
+| SD 挂载与路径 | `board_sdcard_mount()`、`board_sdcard_path()` |
+| SD 卸载 | 关闭所有文件后调用 `board_sdcard_unmount()` |
+| 震动与停止 | `board_vibration_pulse(ms)`、`board_vibration_stop()` |
 
-普通应用无需知道共享 I2C 句柄或 TCA9555 电源位。
-新增外设时，先在 `drivers/` 添加驱动，再由 `board` 配置接线，最后由应用使用。
-驱动复用于其他 ESP-IDF 5.5 工程时，复制所需目录并在构建中注册；第三方依赖版本随组件 manifest 声明。
+SD 固定 1-bit，不自动格式化，挂载后使用标准文件 API。
+震动默认 35 ms、单次上限 1000 ms，定时关断，不阻塞 UI。
+`board_vibration_is_active()` 只表示软件输出状态，无法检测马达是否实际震动。
+
+## 持续录音
+
+主页就绪后，BOOT 稳定按下满 **2 秒**开始；松手后再次长按 2 秒停止。
+按键消抖为 30 ms，每次按住只触发一次，短按无动作，开机残留的按住状态需先松手。
+准备期间显示 `Starting recording`，实际采集并编码成功后显示右上角 **● REC**；
+停止时显示 `Saving`，末段及索引同步完成后图标消失，恢复 `Ready`。
+录音图标不闪烁，不显示持续变化的计时器。
+
+按已确认的硬件配置，左右 I2S 通道均作为独立麦克风：先用 64-bit 整数等权平均，
+再按板级 `BOARD_AUDIO_PCM_SHIFT=12` 缩放并限幅为 PCM16。
+不沿用原项目的麦克风/回声参考通道语义，不加 AGC、降噪或静音跳过。
+I2S0 使用从机 Philips 32-bit stereo RX，外置音频模块提供 16 kHz WS；
+每次录音前通过 UART2 重发原板模式命令，PA 保持关闭。
+
+采集任务与编码/写卡任务分开，约 2 秒 PCM 队列放在 PSRAM，任务栈使用内部 RAM。
+编码为 16 kHz 单声道、24 kbps CBR Opus、20 ms 帧，complexity 0，关闭 DTX/FEC。
+每段独立编码器并补偿编码延迟；以真实样本数切片，完整分段恰好 300 秒。
+文件切换不停止采集；队列或 DMA 丢帧、持续 1 秒收不到输入时明确停止并报错。
+
+```text
+/sdcard/recordings/
+  000001/
+    index.jsonl
+    000001.ogg
+    000002.ogg
+    000003.ogg.part
+  000002/
+    index.jsonl
+    000001.ogg
+```
+
+每次开始扫描并建立新的六位编号目录，分段编号从 1 开始，不依赖系统时间且不覆盖旧文件。
+录音持续写入 `.ogg.part`，每秒同步；每五分钟写入 Ogg EOS、同步并关闭，然后改名为 `.ogg`，
+最后追加并同步索引。停止时使用同样流程保存不足五分钟的末段，不生成空的完成分段。
+每五分钟音频约 0.9 MB，加上少量 Ogg 页开销。
+
+`index.jsonl` 首行 `type=session` 记录版本、会话编号、采样率、声道数和码率；
+后续 `type=segment` 记录 `sequence`、`file`、`start_sample`、`samples`、`duration_ms`、`bytes`。
+先按会话目录编号、再按 `sequence` 即可确定音频保存顺序；`samples` 是精确时长依据。
+索引只接收以换行结尾的完整 JSON 记录；未来消费者必须忽略残缺尾行，并确认对应文件存在。
+
+无卡、卡满、音频或写入异常会停止本次录音并在主页显示错误；修复后可重新长按开始。
+正常停止后关闭所有文件并卸载 SD 卡。意外断电不自动恢复录音，不修复 `.part`，
+也不自动收录已改名但未提交索引的文件；这些文件会保留供人工检查。
+
+依赖锁定为 `78/esp-opus` 1.0.5；许可说明见 `middleware/ogg_opus/NOTICE.md`。
 
 ## 编译与烧录
 
-在 ESP-IDF PowerShell 中运行：
+在 ESP-IDF PowerShell 中：
 
 ```powershell
 cd D:\Github\wintermute-esp32
@@ -83,104 +163,53 @@ idf.py build
 idf.py -p COM9 flash monitor
 ```
 
-普通 PowerShell 先加载本机环境：
+普通 PowerShell 可先加载本机工具链：
 
 ```powershell
 $env:Path = 'D:\Espressif\python_env\idf5.5_py3.11_env\Scripts;' + $env:Path
 . D:\Espressif\frameworks\esp-idf-v5.5.4\export.ps1
 ```
 
-`COM9` 来自当前 VS Code 配置，变化时替换为实际串口。退出监视器按 `Ctrl+]`。
-工程提供 `sdkconfig`、`sdkconfig.defaults` 和 `partitions.csv`；新配置先执行 `idf.py set-target esp32s3`。
-首次构建会下载锁定版本的 LVGL 和官方触摸组件。烧录会替换当前应用和分区表，无需 `erase-flash`。
-
-## 默认测试固件
-
-- **NEXT +1 / RESET**：增加或清零计数，并改变进度条。
-- **FULL REFRESH**：强制全刷；四角 **TL/TR/BL/BR** 用于检查触摸方向。
-- 松手后显示最后的原生坐标与屏幕坐标。
-- **BOOT 短按**增加计数并触发 35 ms 短震，**长按 1 秒**请求全刷。
-- **SD 按钮**显示测试结果与卡容量，点击可重测。
-- **VIBE 35ms / VIBE 200ms / STOP**：短震、长一点的震动、立即停止；下方显示请求与输出状态。
-
-显示首帧全刷，后续变化局刷；10 次成功局刷后的下一次变化会全刷清残影。
-静止页面不反复刷新。刷屏、触摸采样、SD 测试各自执行，所有 LVGL API 都在 UI 任务调用。
-全刷出现黑白闪烁属于波形过程，完成以串口 `Frame ... complete` 为准。
-当前 LVGL 页面使用 1-bit 黑白，未加载中文字库。
-
-CST816S 可能休眠后不响应 I2C；初始 `NO TOUCH` 时点击屏幕唤醒，驱动在 IRQ 后重试。
-原生坐标 480×800 转为横向 800×480：`x = raw_y`，`y = 479 - raw_x`。
-原生 Y=900 的盖板虚拟键不属于有效屏区，过滤后不会误触屏幕边缘。
-
-SD 测试使用 FAT 卡，建议 FAT32；当前不启用 exFAT，不会自动格式化。
-自动挂载后，以 `O_CREAT | O_EXCL` 创建新的 `Wxxxxxxx.TST` 文件，写入 4096 字节、同步、
-关闭、重读校验，再删除自建文件并卸载。已有同名文件会跳过，不覆盖。
-
-- **SD: PASS**：挂载、读写校验、清理和卸载全部成功。
-- **SD: NOT READY**：未插卡、连接异常或不支持的文件系统；看串口错误。
-- **SD: TEST FAILED**：文件操作或卸载失败；串口会说明步骤和可能遗留的测试文件。
-
-测试期间不要拔卡。成功卸载后可更换卡再点击重测；未实现热插拔检测。
-没有触摸或 SD 卡时，显示和 BOOT 测试仍可使用。
-
-## 震动测试与复用
-
-马达采用原项目的 **GPIO44、高有效、35 ms 默认脉冲**。配置集中在
-`config/board_config.h`；板级初始化在外设电源打开前尝试将马达输出置为关闭，启动不自动震动。
-驱动通过 `esp_timer` 自动关断，调用不等待脉冲结束，不阻塞 LVGL、触摸或 SD 任务。
-连续点击会从新请求时刻重新计时；单次上限为 1000 ms，超限返回错误，不提供无限常开接口。
-
-验收方法：点击 35 ms，应感到一次短震；点击 200 ms，时长应明显增加；在 200 ms 期间点 STOP，
-应提前停止。重复点击后应在最后一次请求结束时停止。无触摸时可短按 BOOT 验证 35 ms。
-墨水屏显示比马达动作慢，短脉冲可能结束后才显示状态，以手感和串口日志一起判断。
-`OUTPUT OFF` 只表示软件已关闭 GPIO，板上没有震动反馈传感器，不能据此判定马达硬件通过。
-
-驱动不依赖板型、LVGL 或测试代码，复用时通过 `vibration_config_t` 传入引脚、有效极性、
-默认脉宽和上限；直接驱动 API `vibration_pulse(handle, 0)` 表示使用默认脉宽，停止使用
-`vibration_stop()`。当前实例与定时器常驻到重启，同一引脚只创建一个实例。
-默认固件增加震动测试；原始屏幕诊断仍只测试显示，马达保持关闭。
-
-## 原始屏幕诊断
-
-`idf.py menuconfig` → `Wintermute display` → `Display application`，选择
-`Raw panel diagnostic (black/white/gray/partial)`。
-此模式依次显示白屏、黑屏、四灰阶、黑白测试图、5 次局刷计数，然后让面板休眠。
-短按 BOOT 重跑；结束日志为 `Display test complete. Press BOOT to run again.`。
-该模式不启动触摸、SD 或震动测试；切回 `LVGL display, touch, SD card and vibration test` 恢复默认固件。
-
-## 接线与排查
-
-| 信号 | 连接 |
-| --- | --- |
-| 屏幕 MOSI / SCLK / CS | GPIO8 / GPIO14 / GPIO45；SPI3、10 MHz |
-| 屏幕 DC / RST / BUSY | GPIO13 / GPIO18 / GPIO9（BUSY 高有效） |
-| 共享 I2C SDA / SCL | GPIO41 / GPIO42 |
-| TCA9555 / CST816S | 0x20、100 kHz / 0x15、400 kHz |
-| 触摸 INT / RST | GPIO1 / TCA9555 P1.1 |
-| 总电源 / 屏卡座电源 | TCA9555 P0.6 / P0.5 |
-| SD CLK / CMD / D0 / DAT3 | GPIO38 / GPIO40 / GPIO39 / GPIO46；1-bit、20 MHz |
-| BOOT | GPIO0，低有效 |
-| 马达开关 | GPIO44，高有效；默认 35 ms，最大单次 1000 ms |
-
-`BOARD_IO_*_MASK` 是 TCA9555 扩展口位，不能当成 ESP32 GPIO。
-GPIO46 仅输入上拉；USB MUX 保持调试通路；关机脉冲脚 P1.3 保持高。
-
-`TCA9555 missing` 检查电源与 I2C；`BUSY ... 15 seconds` 检查屏幕排线、电源、BUSY/RST。
-日志完成但屏幕不变时仍需检查实物，SPI 不会读回面板身份。
-触摸持续不可用时检查 GPIO1、共享 I2C、触摸排线及 P1.1 复位。
+串口变化时替换 COM9；退出监视器按 `Ctrl+]`。
+工程提供 `sdkconfig`、`sdkconfig.defaults` 和 `partitions.csv`，全新目标配置使用 `idf.py set-target esp32s3`。
+首次构建会下载锁定版本的 LVGL、触摸及 Opus 组件。烧录替换当前应用和分区表，无需 `erase-flash`。
 
 ## 验证
 
-在已配置 C 编译器、CMake 和 Ninja 的主机终端中：
+主机检查直接编译实际生产代码，输出放在 `build/`。在 Windows 的 Visual Studio 开发者终端中，
+确保 CMake/Ninja 可用，然后从项目根目录执行：
 
 ```powershell
-cmake -S tests/metalio -B build/host-tests -G Ninja
-cmake --build build/host-tests
-ctest --test-dir build/host-tests --output-on-failure
+foreach ($suite in @('logic', 'microphone', 'capture', 'storage', 'writer')) {
+    cmake -S "tests/audio/$suite" -B "build/audio-$suite" -G Ninja
+    if ($LASTEXITCODE -ne 0) { throw "Configure failed: $suite" }
+    cmake --build "build/audio-$suite"
+    if ($LASTEXITCODE -ne 0) { throw "Build failed: $suite" }
+    ctest --test-dir "build/audio-$suite" --output-on-failure
+    if ($LASTEXITCODE -ne 0) { throw "Test failed: $suite" }
+}
 ```
 
-震动主机测试使用模拟 GPIO 和定时器，直接链接实际驱动，检查脉冲、自动关闭、停止、重触发、
-有效极性、参数与错误处理。硬件测试入口保留在默认 LVGL 测试页中。
-主机测试不代替实际震动手感、触摸响应、SD 电气连接和屏幕视觉验收。
+- `logic`：启动按住屏蔽、消抖、2 秒阈值、单次触发、独立 PCM 混音/限幅。
+- `microphone`：实际驱动配合模拟 I2S，验证半帧拼接、超时、DMA 丢帧和重复启停。
+- `capture`：实际采集模块配合模拟任务与 I2S，验证短读、停止后排空、溢出、无音频及故障重试。
+- `storage`：目录递增、碰撞、索引顺序和文件大小校验；Windows 额外注入部分写入、卡满、同步失败。
+- `writer`：直接调用分段存储模块，验证一批 PCM 跨多段、两个五分钟整段和末段、空段避免、
+  异常中止，以及只有索引提交成功才推进保存计数；测试编码器用计数假实现，文件/索引执行实际代码。
+- `ogg`：实际 Opus 固定点源码及生产封装器，独立解析 CRC/页号并使用 FFmpeg 解码，
+  验证 300 秒、非整帧末段和极短音频时长及切片交界。运行方法见 `tests/audio/ogg/README.md`。
 
-移植源为本地 `D:\Github\Metalio-E-INK4-main`；来源与许可见 `drivers/ssd1677/NOTICE.md`。
+实机验收：分别对左右麦克风发声确认两路均有效，连续录音超过 10 分钟后停止，
+应产生两个 300 秒分段及一个末段，索引样本位置连续，图标正确切换。
+另验证无卡/卡满、故障后重试和断电后已完成分段保留。
+串口 `Saved session ... segment ...` 只在音频和索引均保存成功后输出；停止日志给出
+编码/写卡耗时及任务剩余栈，启动日志给出内部 RAM/PSRAM 可用量。
+主机测试和固件编译不能替代实物接线、实际采样率、持续录音性能与供电异常验证。
+
+## 硬件说明
+
+接线定义集中在 `config/board_config.h`。`BOARD_IO_*_MASK` 表示扩展器端口位，不能当作 ESP32 GPIO。
+屏幕初始化失败时查看串口中的 I2C、BUSY、供电错误；CST816S 休眠后可能需要触摸唤醒。
+触摸原生为 480×800，与竖屏主页直接对应，不交换或镜像坐标；Y=900 的盖板虚拟键尚未接入应用。
+
+移植源为本地 `D:\Github\Metalio-E-INK4-main`，来源与许可见 `drivers/ssd1677/NOTICE.md`。

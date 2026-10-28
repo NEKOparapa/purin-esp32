@@ -5,6 +5,7 @@
 #include "esp_err.h"
 #include "esp_lcd_panel_ops.h"
 #include "cst816s_touch.h"
+#include "i2s_microphone.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,6 +23,14 @@ esp_err_t board_display_init(esp_lcd_panel_handle_t *panel);
 
 // BOOT 为低有效；board_init 成功后读取，消抖和按键动作由应用处理。
 bool board_boot_pressed(void);
+
+// 配置外置音频模块并创建从机双路 I2S RX；仅准备资源，不开始采集。
+// 每次调用重发模块模式指令，调用前须停止采集；可在失败恢复后重试。
+// 本接口会等待模块上电/模式切换，须在录音工作任务串行调用，不能阻塞 UI。
+// 资源持续到重启，返回借用句柄；应用仅调用 start/read/stop，不得 destroy。
+esp_err_t board_microphone_init(i2s_microphone_handle_t *microphone);
+// 原板 32-bit 采样转换成 PCM16 的缩放位数；混音后再缩放/限幅。
+uint8_t board_microphone_pcm_shift(void);
 
 // 初始化马达输出为关闭状态，不产生启动震动；board_init 会调用，可串行重试。
 esp_err_t board_vibration_init(void);
