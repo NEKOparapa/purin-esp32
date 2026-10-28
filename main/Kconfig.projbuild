@@ -1,0 +1,12 @@
+menu "Wintermute display"
+    choice WINTERMUTE_DISPLAY_MODE
+        prompt "Display application"
+        default WINTERMUTE_DISPLAY_LVGL
+
+        config WINTERMUTE_DISPLAY_LVGL
+            bool "LVGL display, touch and SD card test"
+
+        config WINTERMUTE_DISPLAY_DIAGNOSTIC
+            bool "Raw panel diagnostic (black/white/gray/partial)"
+    endchoice
+endmenu
