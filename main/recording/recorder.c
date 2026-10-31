@@ -1,12 +1,16 @@
 #include "recorder.h"
 
 #include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
 #include "board.h"
 #include "audio_capture.h"
 #include "recording_writer.h"
+#include "audio_upload.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -18,6 +22,8 @@ static struct {
     TaskHandle_t worker;
     audio_capture_handle_t capture;
     recorder_status_t status;
+    uint32_t upload_minutes;
+    bool retry_upload;
 } ctx;
 static portMUX_TYPE status_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -83,6 +89,12 @@ static void run_session(void)
     uint64_t write_samples = 0;
     audio_capture_block_t block;
     board_sdcard_info_t info;
+    audio_upload_snapshot_t snapshot = {0};
+    char recording_id[64];
+    uint32_t random_id[4];
+    esp_fill_random(random_id, sizeof(random_id));
+    snprintf(recording_id, sizeof(recording_id), "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32,
+             random_id[0], random_id[1], random_id[2], random_id[3]);
 
     esp_err_t err = board_sdcard_mount(&info);
     if (err != ESP_OK) {
@@ -111,6 +123,65 @@ static void run_session(void)
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     for (;;) {
+        portENTER_CRITICAL(&status_lock);
+        uint32_t upload_minutes = ctx.upload_minutes;
+        bool retry_upload = ctx.retry_upload;
+        ctx.upload_minutes = 0;
+        portEXIT_CRITICAL(&status_lock);
+        if (upload_minutes) {
+            recording_writer_stats_t stats = recording_writer_get_stats(writer);
+            if (!(retry_upload && snapshot.samples && snapshot.window_minutes == upload_minutes)) {
+                const uint64_t limit = (uint64_t)upload_minutes * 60 * RECORDING_WRITER_SAMPLE_RATE;
+                const int64_t captured_at_us = esp_timer_get_time();
+                // 固定请求处理时的队列水位，把已经采集但尚未编码的音频也包含在快照内。
+                // 不追逐后续新入队的块，否则持续录音时可能永远无法完成快照。
+                audio_capture_status_t pending = audio_capture_get_status(ctx.capture);
+                failure = capture_error(pending.error);
+                for (size_t i = 0; failure == RECORDER_ERROR_NONE && stats.samples < limit && i < pending.queued_blocks; ++i) {
+                    err = audio_capture_read(ctx.capture, &block, 50);
+                    if (err != ESP_OK) {
+                        failure = RECORDER_ERROR_MICROPHONE;
+                        break;
+                    }
+                    int64_t before = esp_timer_get_time();
+                    failure = writer_error(recording_writer_write(writer, block.pcm, block.count));
+                    int64_t elapsed = esp_timer_get_time() - before;
+                    if (elapsed > max_write_us) {
+                        max_write_us = elapsed;
+                    }
+                    write_us += elapsed;
+                    write_samples += block.count;
+                    stats = recording_writer_get_stats(writer);
+                    publish_progress(stats, false);
+                }
+                if (failure == RECORDER_ERROR_NONE) {
+                    failure = capture_error(audio_capture_get_status(ctx.capture).error);
+                }
+                if (failure != RECORDER_ERROR_NONE) {
+                    audio_upload_fail();
+                    break;
+                }
+                if (stats.samples < limit) {
+                    failure = writer_error(recording_writer_checkpoint(writer));
+                    if (failure != RECORDER_ERROR_NONE) {
+                        audio_upload_fail();
+                        break;
+                    }
+                    stats = recording_writer_get_stats(writer);
+                    publish_progress(stats, false);
+                }
+                snapshot = (audio_upload_snapshot_t) {
+                    .session_id = stats.session_id,
+                    .window_minutes = upload_minutes,
+                    .samples = stats.samples < limit ? stats.samples : limit,
+                    .elapsed_samples = stats.samples,
+                    .captured_at_us = captured_at_us,
+                };
+                snprintf(snapshot.root, sizeof(snapshot.root), "%s", board_sdcard_path());
+                snprintf(snapshot.recording_id, sizeof(snapshot.recording_id), "%s", recording_id);
+            }
+            (void)audio_upload_submit(&snapshot);
+        }
         audio_capture_status_t input = audio_capture_get_status(ctx.capture);
         failure = capture_error(input.error);
         if (failure != RECORDER_ERROR_NONE || (input.done && input.queued_blocks == 0)) {
@@ -144,6 +215,14 @@ static void run_session(void)
     }
 
 cleanup:
+    portENTER_CRITICAL(&status_lock);
+    ctx.status.state = RECORDER_STOPPING;
+    bool pending_upload = ctx.upload_minutes != 0;
+    ctx.upload_minutes = 0;
+    portEXIT_CRITICAL(&status_lock);
+    if (pending_upload) {
+        audio_upload_fail();
+    }
     // 仅正常停止会在上面的循环排空队列；故障立即停采，存储层保留未完成文件。
     audio_capture_request_stop(ctx.capture);
     audio_capture_status_t input;
@@ -168,6 +247,10 @@ cleanup:
         publish_progress(stats, false);
     }
     if (mounted) {
+        // 上传只读已提交文件。停止采集/保存后等待读者关闭文件，再卸载 SD。
+        while (audio_upload_busy()) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
         err = board_sdcard_unmount();
         if (err != ESP_OK && failure == RECORDER_ERROR_NONE) {
             failure = RECORDER_ERROR_STORAGE;
@@ -233,6 +316,31 @@ esp_err_t recorder_stop(void)
     ctx.status.state = RECORDER_STOPPING;
     // request_stop 仅作原子标记，保持状态切换和停止请求一起完成。
     audio_capture_request_stop(ctx.capture);
+    portEXIT_CRITICAL(&status_lock);
+    return ESP_OK;
+}
+
+esp_err_t recorder_upload(uint32_t minutes)
+{
+    if (minutes != 15 && minutes != 30 && minutes != 60 && minutes != 120) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (recorder_get_status().state != RECORDER_RECORDING || audio_upload_busy()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    bool retry = audio_upload_get_status().state == AUDIO_UPLOAD_FAILED;
+    esp_err_t error = audio_upload_prepare();
+    if (error != ESP_OK) {
+        return error;
+    }
+    portENTER_CRITICAL(&status_lock);
+    if (ctx.status.state != RECORDER_RECORDING) {
+        portEXIT_CRITICAL(&status_lock);
+        audio_upload_fail();
+        return ESP_ERR_INVALID_STATE;
+    }
+    ctx.upload_minutes = minutes;
+    ctx.retry_upload = retry;
     portEXIT_CRITICAL(&status_lock);
     return ESP_OK;
 }

@@ -5,6 +5,30 @@
 
 static lv_obj_t *recording_icon;
 static lv_obj_t *status_label;
+static lv_obj_t *home_content;
+static lv_obj_t *upload_panel;
+static lv_obj_t *upload_status;
+static lv_obj_t *duration_buttons[4];
+static const uint32_t durations[] = {30, 15, 60, 120};
+static unsigned selected_duration;
+
+static void select_duration(lv_event_t *event)
+{
+    selected_duration = (unsigned)(uintptr_t)lv_event_get_user_data(event);
+    for (unsigned i = 0; i < 4; ++i) {
+        if (i == selected_duration) {
+            lv_obj_add_state(duration_buttons[i], LV_STATE_CHECKED);
+        } else {
+            lv_obj_remove_state(duration_buttons[i], LV_STATE_CHECKED);
+        }
+    }
+}
+
+static void cancel_upload(lv_event_t *event)
+{
+    (void)event;
+    home_screen_show_upload_confirmation(false);
+}
 
 static lv_obj_t *make_label(lv_obj_t *parent, int x, int y, int width,
                             const char *text, const lv_font_t *font,
@@ -32,6 +56,27 @@ static void make_divider(lv_obj_t *parent, int y, int width)
     lv_obj_set_size(line, width, 1);
     lv_obj_set_style_bg_color(line, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(line, LV_OPA_COVER, LV_PART_MAIN);
+}
+
+static lv_obj_t *make_button(lv_obj_t *parent, int x, int y, int width, const char *text)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_remove_style_all(button);
+    lv_obj_remove_flag(button, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(button, x, y);
+    lv_obj_set_size(button, width, 64);
+    lv_obj_set_style_border_width(button, 2, 0);
+    lv_obj_set_style_border_color(button, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(button, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(button, lv_color_black(), LV_STATE_CHECKED);
+    lv_obj_t *label = lv_label_create(button);
+    lv_obj_set_style_text_font(button, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(button, lv_color_black(), 0);
+    lv_obj_set_style_text_color(button, lv_color_white(), LV_STATE_CHECKED);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    return button;
 }
 
 void home_screen_create(void)
@@ -67,10 +112,68 @@ void home_screen_create(void)
     make_label(recording_icon, 22, 4, 54, "REC", &lv_font_montserrat_20, LV_TEXT_ALIGN_LEFT);
     lv_obj_add_flag(recording_icon, LV_OBJ_FLAG_HIDDEN);
     make_divider(screen, 112, content_width);
-    make_label(screen, 32, height / 2 - 48, content_width, "HOME", &lv_font_montserrat_48, LV_TEXT_ALIGN_CENTER);
-    make_label(screen, 32, height / 2 + 24, content_width, "Home screen placeholder", &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
+    home_content = lv_obj_create(screen);
+    lv_obj_remove_style_all(home_content);
+    lv_obj_remove_flag(home_content, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(home_content, 0, 130);
+    lv_obj_set_size(home_content, width, height - 250);
+    make_label(home_content, 32, 150, content_width, "HOME", &lv_font_montserrat_48, LV_TEXT_ALIGN_CENTER);
+    make_label(home_content, 32, 230, content_width, "Hold BOOT: start / stop", &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
+    make_label(home_content, 32, 270, content_width, "While recording, tap to upload", &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
+    upload_status = make_label(home_content, 32, 350, content_width, "", &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
+
+    upload_panel = lv_obj_create(screen);
+    lv_obj_remove_style_all(upload_panel);
+    lv_obj_remove_flag(upload_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(upload_panel, 32, 140);
+    lv_obj_set_size(upload_panel, content_width, height - 250);
+    make_label(upload_panel, 0, 10, content_width, "UPLOAD RECORDING", &lv_font_montserrat_28, LV_TEXT_ALIGN_CENTER);
+    make_label(upload_panel, 0, 65, content_width, "From this recording's start", &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
+    const char *labels[] = {"30 minutes", "15 minutes", "1 hour", "2 hours"};
+    for (unsigned i = 0; i < 4; ++i) {
+        duration_buttons[i] = make_button(upload_panel, (i % 2) * (content_width + 12) / 2,
+                                          120 + (i / 2) * 88, (content_width - 12) / 2, labels[i]);
+        lv_obj_add_event_cb(duration_buttons[i], select_duration, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+    }
+    lv_obj_add_state(duration_buttons[0], LV_STATE_CHECKED);
+    make_label(upload_panel, 0, 310, content_width, "Tap BOOT again to confirm", &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
+    make_label(upload_panel, 0, 348, content_width, "Shorter recording: upload all", &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
+    lv_obj_t *cancel = make_button(upload_panel, 0, 414, content_width, "Cancel");
+    lv_obj_add_event_cb(cancel, cancel_upload, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(upload_panel, LV_OBJ_FLAG_HIDDEN);
     make_divider(screen, height - 96, content_width);
     status_label = make_label(screen, 32, height - 64, content_width, "Ready", &lv_font_montserrat_20, LV_TEXT_ALIGN_LEFT);
+}
+
+void home_screen_show_upload_confirmation(bool visible)
+{
+    if (!upload_panel || !home_content) {
+        return;
+    }
+    if (visible) {
+        lv_obj_remove_flag(upload_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(home_content, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(upload_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(home_content, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+bool home_screen_upload_confirmation_visible(void)
+{
+    return upload_panel && !lv_obj_has_flag(upload_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+uint32_t home_screen_upload_minutes(void)
+{
+    return durations[selected_duration];
+}
+
+void home_screen_set_upload_status(const char *status)
+{
+    if (upload_status && status && strcmp(lv_label_get_text(upload_status), status) != 0) {
+        lv_label_set_text(upload_status, status);
+    }
 }
 
 void home_screen_set_recording(bool active, const char *status)

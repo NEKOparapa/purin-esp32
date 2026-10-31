@@ -119,7 +119,7 @@ recording_write_result_t recording_writer_write(recording_writer_handle_t writer
         if (!writer->audio && open_segment(writer) != RECORDING_WRITE_OK) {
             return writer->failure;
         }
-        const uint64_t remaining = writer->segment_limit - writer->segment_samples;
+        const uint64_t remaining = writer->segment_limit - writer->stats.samples % writer->segment_limit;
         const size_t amount = remaining < count ? (size_t)remaining : count;
         errno = 0;
         esp_err_t error = ogg_opus_write(writer->audio, pcm, amount);
@@ -130,11 +130,22 @@ recording_write_result_t recording_writer_write(recording_writer_handle_t writer
         writer->stats.samples += amount;
         pcm += amount;
         count -= amount;
-        if (writer->segment_samples == writer->segment_limit && commit_segment(writer) != RECORDING_WRITE_OK) {
+        if (writer->stats.samples % writer->segment_limit == 0 && commit_segment(writer) != RECORDING_WRITE_OK) {
             return writer->failure;
         }
     }
     return RECORDING_WRITE_OK;
+}
+
+recording_write_result_t recording_writer_checkpoint(recording_writer_handle_t writer)
+{
+    if (!writer) {
+        return RECORDING_WRITE_INVALID_ARGUMENT;
+    }
+    if (writer->failure != RECORDING_WRITE_OK) {
+        return writer->failure;
+    }
+    return writer->audio && writer->segment_samples ? commit_segment(writer) : RECORDING_WRITE_OK;
 }
 
 recording_write_result_t recording_writer_sync(recording_writer_handle_t writer)

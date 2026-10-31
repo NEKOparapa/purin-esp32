@@ -3,6 +3,7 @@
 #include "lvgl_port.h"
 #include "recorder.h"
 #include "recording_button.h"
+#include "audio_upload.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -26,18 +27,34 @@ static void ui_task(void *arg)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Recorder initialization failed: %s", esp_err_to_name(err));
     }
+    err = audio_upload_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Upload initialization failed: %s", esp_err_to_name(err));
+    }
     recording_button_t boot = {0};
     ESP_LOGI(TAG, "Startup complete: home screen ready");
     for (;;) {
-        if (recording_button_update(&boot, board_boot_pressed(), (uint64_t)esp_timer_get_time() / 1000)) {
+        recording_button_event_t button = recording_button_update(&boot, board_boot_pressed(), (uint64_t)esp_timer_get_time() / 1000);
+        if (button == RECORDING_BUTTON_LONG) {
+            home_screen_show_upload_confirmation(false);
             recorder_status_t state = recorder_get_status();
             if (state.state == RECORDER_RECORDING) {
                 (void)recorder_stop();
             } else if (state.state == RECORDER_IDLE || state.state == RECORDER_ERROR) {
                 (void)recorder_start();
             }
+        } else if (button == RECORDING_BUTTON_SHORT && recorder_get_status().state == RECORDER_RECORDING && !audio_upload_busy()) {
+            if (home_screen_upload_confirmation_visible()) {
+                (void)recorder_upload(home_screen_upload_minutes());
+                home_screen_show_upload_confirmation(false);
+            } else {
+                home_screen_show_upload_confirmation(true);
+            }
         }
         recorder_status_t status = recorder_get_status();
+        if (status.state != RECORDER_RECORDING) {
+            home_screen_show_upload_confirmation(false);
+        }
         const char *text = recorder_error_text(status.error);
         if (status.state == RECORDER_STARTING) {
             text = "Starting recording";
@@ -47,6 +64,9 @@ static void ui_task(void *arg)
             text = "Saving";
         }
         home_screen_set_recording(status.state == RECORDER_RECORDING || status.state == RECORDER_STOPPING, text);
+        audio_upload_state_t upload = audio_upload_get_status().state;
+        home_screen_set_upload_status(upload == AUDIO_UPLOAD_FAILED && status.state != RECORDER_RECORDING
+            ? "Upload failed; audio kept on SD" : audio_upload_status_text(upload));
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(10) > 0 ? pdMS_TO_TICKS(10) : 1);
     }

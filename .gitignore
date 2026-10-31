@@ -93,3 +93,6 @@ Desktop.ini
 # Local calendar credentials and Mac bridge runtime state
 bridge/calendar/.env
 bridge/calendar/.data/
+
+# Local device upload credentials
+/config/upload_config.local.h

@@ -1,10 +1,16 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // 在 LVGL 初始化完成后，由 UI 任务创建静态占位主页。
-// 页面仅负责显示，不注册按键、触摸事件或硬件测试操作。
+// 页面管理触摸选择，BOOT 操作由应用层负责。
 void home_screen_create(void);
 
 // 仅 UI 任务调用；状态未变化时不触发刷屏，录音图标保持静态。
 void home_screen_set_recording(bool active, const char *status);
+
+void home_screen_show_upload_confirmation(bool visible);
+bool home_screen_upload_confirmation_visible(void);
+uint32_t home_screen_upload_minutes(void);
+void home_screen_set_upload_status(const char *status);

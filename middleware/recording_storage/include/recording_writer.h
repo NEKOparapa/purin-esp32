@@ -38,6 +38,9 @@ recording_write_result_t recording_writer_write(recording_writer_handle_t writer
                                                 const int16_t *pcm, size_t count);
 // 调用方定期调用（当前应用每秒一次）；仅同步已有音频，不创建空文件。
 recording_write_result_t recording_writer_sync(recording_writer_handle_t writer);
+// 提交当前末段但保持会话打开。后续仍按会话起点的 segment_samples 边界分段。
+// 同 write 一样由唯一录音任务调用，成功后已保存文件均不可变。
+recording_write_result_t recording_writer_checkpoint(recording_writer_handle_t writer);
 recording_writer_stats_t recording_writer_get_stats(recording_writer_handle_t writer);
 // 正常保存末段，关闭索引并释放句柄；失败也置 NULL，返回最终统计。
 recording_write_result_t recording_writer_finish(recording_writer_handle_t *writer,
