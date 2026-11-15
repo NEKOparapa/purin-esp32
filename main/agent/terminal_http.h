@@ -1,0 +1,9 @@
+#pragma once
+#include <stddef.h>
+#include "cJSON.h"
+#include "esp_http_client.h"
+
+esp_http_client_handle_t terminal_http_client(const char *path, esp_http_client_method_t method,
+                                              http_event_handle_cb handler, void *data);
+cJSON *terminal_http_json(char *status, size_t size, esp_http_client_method_t method,
+                          const char *path, const cJSON *body, int expected);

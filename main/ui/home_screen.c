@@ -1,4 +1,6 @@
 #include "home_screen.h"
+#include "agent_screen.h"
+#include "notice_screen.h"
 
 #include <string.h>
 #include "lvgl.h"
@@ -79,6 +81,12 @@ static lv_obj_t *make_button(lv_obj_t *parent, int x, int y, int width, const ch
     return button;
 }
 
+static void open_agent(lv_event_t *event)
+{
+    (void)event;
+    agent_screen_open();
+}
+
 void home_screen_create(void)
 {
     lv_obj_t *screen = lv_screen_active();
@@ -117,10 +125,15 @@ void home_screen_create(void)
     lv_obj_remove_flag(home_content, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(home_content, 0, 130);
     lv_obj_set_size(home_content, width, height - 250);
-    make_label(home_content, 32, 150, content_width, "HOME", &lv_font_montserrat_48, LV_TEXT_ALIGN_CENTER);
+    lv_obj_t *heading = make_label(home_content, 32, 150, content_width, "HOME", &lv_font_montserrat_48, LV_TEXT_ALIGN_CENTER);
+    lv_obj_set_height(heading, 72);
     make_label(home_content, 32, 230, content_width, "Hold BOOT: start / stop", &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
     make_label(home_content, 32, 270, content_width, "While recording, tap to upload", &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
     upload_status = make_label(home_content, 32, 350, content_width, "", &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
+
+    lv_obj_t *chat = make_button(home_content, 32, 399, content_width, "Agent chat");
+    lv_obj_add_event_cb(chat, open_agent, LV_EVENT_CLICKED, NULL);
+    notice_screen_init(make_button(home_content, 32, 475, content_width, "Notifications"), heading);
 
     upload_panel = lv_obj_create(screen);
     lv_obj_remove_style_all(upload_panel);
@@ -151,6 +164,8 @@ void home_screen_show_upload_confirmation(bool visible)
         return;
     }
     if (visible) {
+        agent_screen_hide();
+        notice_screen_hide();
         lv_obj_remove_flag(upload_panel, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(home_content, LV_OBJ_FLAG_HIDDEN);
     } else {

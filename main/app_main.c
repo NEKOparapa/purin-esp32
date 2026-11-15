@@ -4,6 +4,8 @@
 #include "recorder.h"
 #include "recording_button.h"
 #include "audio_upload.h"
+#include "agent_client.h"
+#include "terminal_network.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -27,6 +29,10 @@ static void ui_task(void *arg)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Recorder initialization failed: %s", esp_err_to_name(err));
     }
+    err = terminal_network_init();
+    if (err != ESP_OK) ESP_LOGE(TAG, "Network initialization failed: %s", esp_err_to_name(err));
+    err = agent_client_init();
+    if (err != ESP_OK) ESP_LOGE(TAG, "Agent initialization failed: %s", esp_err_to_name(err));
     err = audio_upload_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Upload initialization failed: %s", esp_err_to_name(err));

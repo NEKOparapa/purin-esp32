@@ -1,14 +1,27 @@
 # Wintermute ESP32 — Metalio E-Ink 4
 
-基于 ESP-IDF 5.5.4 的项目基础固件。启动后进入竖屏主页，支持 BOOT 长按持续录音、短按确认音频上传。
+基于 ESP-IDF 5.5.4 的录音和 Agent 终端。主页可进入对话，BOOT 长按录音，短按选择并确认上传。
 硬件为 ESP32-S3、16 MB Flash、Octal PSRAM、SSD1677 / GDEM0397T81 800×480 墨水屏。
 图形库为 LVGL 9.5.0，触摸使用官方 CST816S 1.0.6 组件。
 
 ## 启动与主页
 
 启动顺序：`app_main()` → `board_init()` → UI 任务 → `lvgl_port_init()` → `home_screen_create()`。
-主页采用 **480×800 竖屏**，显示 WINTERMUTE、HOME、Ready 等静态占位内容，使用已有英文字体。
-后续页面从 `main/ui/home_screen.c` 扩展。
+主页采用 **480×800 竖屏**，显示录音和上传状态。触摸 **Agent chat** 打开对话。
+
+## 屏上对话与信息采集
+
+- 触摸输入框，用屏幕键盘输入英文，点上方 **EN / 拼音** 切换输入法后可点选汉字，按 **Send** 发送。收到任务回执后，页面每 5 秒检查回复。上下滑动可阅读长文本。屏上使用 Noto Sans SC 的 GB2312 汉字子集，单次输入最多 192 字符。
+- **Retry** 重查最近一条问题。问题正文和客户端消息 ID 在发送前存入 NVS，任务 ID 收到后写回。断线或重启后再次进入可沿用原 ID 重试或读取最近任务。屏幕保留本次开机最近 16 条正文，跨重启保留最近问题和服务器任务引用。
+- **Inbox** 取本终端的一条未读输出；后台通知标注为 **Notification**。读完按 **Read / next** 显式确认并取下一条。查询或滚动本身保留服务端的未读状态。超过设备响应上限（单次 HTTP JSON 128 KiB）的内容会报告错误并保留在服务器。
+- **Share state** 读取点按时的实际录音器状态（空闲、启动、录制、保存或故障），以 `recorder.state` 提交至 `POST /v1/perceptions`。设备没有可信日历时钟，由后端记录接收时间。该操作只提交录音状态，会议声音沿用 BOOT 确认上传的音频切片路径。
+- 网络请求使用下文的设备配置和同一终端凭据。录音上传和聊天在独立后台任务上共享 Wi-Fi 连接锁。录音中短按 BOOT 可从聊天页返回上传确认面板。
+
+### 收取通知和附件
+
+主页的 **Notifications** 打开本设备的通知收件箱。闲置在主页时约每分钟检查一次，最新未读提醒的标题会显示在墨水屏上；进入收件箱后可点 **Latest** 查看全部、**Older** 翻看更早通知、**Mark read** 单独确认已读。提醒以服务端时间判断过期。
+
+一条通知可以带多份文件。点击某个文件名后，设备才会连接后端并将该文件分块保存到 FAT 格式 SD 卡的 `/Wintermute/` 目录，文件名前带有附件 ID。没有 SD 卡仍可以读通知和附件列表。录音占用 SD 卡时，请在录音结束后再次点选文件。按需保存沿用配置的服务器地址和本终端的访问凭据。
 
 旧硬件测试页面、原始屏幕诊断、测试模式菜单及按键测试动作已移除。
 当前没有计数器、坐标展示、SD 读写测试或震动测试；BOOT 长按用于开始/停止录音，录音时短按进入上传确认。
@@ -58,10 +71,10 @@ middleware/recording_storage/ PCM 分段保存与顺序索引
 
 main/                     应用层
   app_main.c              初始化与 UI 任务
-  ui/home_screen.c        占位主页与静态录音状态
-  ui/home_screen.h
+  ui/                    录音主页、触屏对话、键盘和收件箱
+  agent/                 按需 Wi-Fi、HTTP 对话、状态采集和 NVS 恢复
   recording/             BOOT 判定、录音状态与模块协调
-  upload/                按需 Wi-Fi、不可变分段读取与后台 HTTP 上传
+  upload/                不可变分段读取与后台音频上传
 ```
 
 只有 `board` 的实现读取 `board_config.h`。驱动不依赖板型、LVGL 或应用；
@@ -221,7 +234,7 @@ $env:Path = 'D:\Espressif\python_env\idf5.5_py3.11_env\Scripts;' + $env:Path
 
 串口变化时替换 COM9；退出监视器按 `Ctrl+]`。
 工程提供 `sdkconfig`、`sdkconfig.defaults` 和 `partitions.csv`，全新目标配置使用 `idf.py set-target esp32s3`。
-首次构建会下载锁定版本的 LVGL、触摸及 Opus 组件。烧录替换当前应用和分区表，无需 `erase-flash`。
+首次构建会下载锁定版本的 LVGL、触摸及 Opus 组件。字体和对话功能使 factory 分区从 2 MiB 扩为 5 MiB。首次升级应使用 `idf.py flash` 同步更新分区表和应用；NVS、PHY 起始位置保持原布局，无需擦除整片 Flash。
 
 ## 验证
 

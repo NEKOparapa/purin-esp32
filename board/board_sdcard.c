@@ -1,14 +1,16 @@
 #include "board.h"
 
 #include <string.h>
+#include <stdatomic.h>
 #include "board_config.h"
 #include "esp_check.h"
 #include "sdcard.h"
 
 static const char *TAG = "board_sdcard";
 static sdcard_handle_t board_card;
+static atomic_flag card_in_use = ATOMIC_FLAG_INIT;
 
-esp_err_t board_sdcard_mount(board_sdcard_info_t *info)
+static esp_err_t mount_card(board_sdcard_info_t *info)
 {
     ESP_RETURN_ON_FALSE(info, ESP_ERR_INVALID_ARG, TAG, "NULL card info");
     memset(info, 0, sizeof(*info));
@@ -27,7 +29,8 @@ esp_err_t board_sdcard_mount(board_sdcard_info_t *info)
     sdcard_info_t card_info;
     esp_err_t err = sdcard_get_info(board_card, &card_info);
     if (err != ESP_OK) {
-        esp_err_t cleanup_err = board_sdcard_unmount();
+        esp_err_t cleanup_err = sdcard_unmount(board_card);
+        board_card = NULL;
         if (cleanup_err != ESP_OK) {
             ESP_LOGW(TAG, "Card info cleanup failed: %s", esp_err_to_name(cleanup_err));
         }
@@ -39,11 +42,20 @@ esp_err_t board_sdcard_mount(board_sdcard_info_t *info)
     return ESP_OK;
 }
 
+esp_err_t board_sdcard_mount(board_sdcard_info_t *info)
+{
+    if (atomic_flag_test_and_set(&card_in_use)) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = mount_card(info);
+    if (err != ESP_OK) atomic_flag_clear(&card_in_use);
+    return err;
+}
+
 esp_err_t board_sdcard_unmount(void)
 {
     ESP_RETURN_ON_FALSE(board_card, ESP_ERR_INVALID_STATE, TAG, "card not mounted");
     esp_err_t err = sdcard_unmount(board_card);
     board_card = NULL; // 底层 unmount 消耗有效句柄；即使报错也不可重用。
+    atomic_flag_clear(&card_in_use);
     return err;
 }
 

@@ -6,32 +6,21 @@
 #include <string.h>
 #include <sys/stat.h>
 #include "esp_crt_bundle.h"
-#include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "nvs_flash.h"
 
-#ifdef WINTERMUTE_LOCAL_UPLOAD_CONFIG
-#include "upload_config.local.h"
-#else
-#include "upload_config.example.h"
-#endif
+#include "terminal_network.h"
 
 static const char *TAG = "audio_upload";
-enum { WIFI_CONNECTED = BIT0, WIFI_ENABLED = BIT1, MAX_SEGMENT_BYTES = 4 * 1024 * 1024 };
+enum { MAX_SEGMENT_BYTES = 4 * 1024 * 1024 };
 static struct {
     QueueHandle_t queue;
     TaskHandle_t worker;
-    EventGroupHandle_t wifi_events;
-    bool wifi_ready;
     audio_upload_status_t status;
 } ctx;
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
@@ -57,16 +46,9 @@ bool audio_upload_busy(void)
     return state == AUDIO_UPLOAD_PREPARING || state == AUDIO_UPLOAD_CONNECTING || state == AUDIO_UPLOAD_SENDING;
 }
 
-static bool configured(void)
-{
-    return WINTERMUTE_WIFI_SSID[0] && WINTERMUTE_SERVER_URL[0] && WINTERMUTE_TERMINAL_ID[0] &&
-           WINTERMUTE_TERMINAL_TOKEN[0] &&
-           (!strncmp(WINTERMUTE_SERVER_URL, "https://", 8) || !strncmp(WINTERMUTE_SERVER_URL, "http://", 7));
-}
-
 esp_err_t audio_upload_prepare(void)
 {
-    if (!ctx.worker || !configured()) {
+    if (!ctx.worker || !terminal_configured()) {
         publish(AUDIO_UPLOAD_NOT_CONFIGURED, 0);
         return ESP_ERR_INVALID_STATE;
     }
@@ -84,99 +66,6 @@ esp_err_t audio_upload_prepare(void)
 void audio_upload_fail(void)
 {
     publish(AUDIO_UPLOAD_FAILED, audio_upload_get_status().sent_segments);
-}
-
-static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
-{
-    (void)arg;
-    (void)data;
-    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        xEventGroupSetBits(ctx.wifi_events, WIFI_CONNECTED);
-    } else if (base == WIFI_EVENT && (id == WIFI_EVENT_STA_START || id == WIFI_EVENT_STA_DISCONNECTED)) {
-        xEventGroupClearBits(ctx.wifi_events, WIFI_CONNECTED);
-        if (xEventGroupGetBits(ctx.wifi_events) & WIFI_ENABLED) {
-            (void)esp_wifi_connect();
-        }
-    }
-}
-
-static esp_err_t wifi_init(void)
-{
-    if (ctx.wifi_ready) {
-        return ESP_OK;
-    }
-    esp_err_t error = nvs_flash_init();
-    if (error != ESP_OK) {
-        return error; // 不擦除已有 NVS。
-    }
-    error = esp_netif_init();
-    if (error != ESP_OK) {
-        return error;
-    }
-    error = esp_event_loop_create_default();
-    if (error != ESP_OK && error != ESP_ERR_INVALID_STATE) {
-        return error;
-    }
-    ctx.wifi_events = xEventGroupCreate();
-    if (!ctx.wifi_events) {
-        return ESP_ERR_NO_MEM;
-    }
-    esp_netif_t *netif = esp_netif_create_default_wifi_sta();
-    wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
-    error = esp_wifi_init(&init);
-    if (error != ESP_OK) {
-        esp_netif_destroy_default_wifi(netif);
-        vEventGroupDelete(ctx.wifi_events);
-        ctx.wifi_events = NULL;
-        return error;
-    }
-    error = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL);
-    if (error == ESP_OK) {
-        error = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL);
-    }
-    wifi_config_t config = {0};
-    if (strlen(WINTERMUTE_WIFI_SSID) > sizeof(config.sta.ssid) ||
-        strlen(WINTERMUTE_WIFI_PASSWORD) > sizeof(config.sta.password)) {
-        error = ESP_ERR_INVALID_ARG;
-    }
-    if (error == ESP_OK) {
-        memcpy(config.sta.ssid, WINTERMUTE_WIFI_SSID, strlen(WINTERMUTE_WIFI_SSID));
-        memcpy(config.sta.password, WINTERMUTE_WIFI_PASSWORD, strlen(WINTERMUTE_WIFI_PASSWORD));
-        error = esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    }
-    if (error == ESP_OK) {
-        error = esp_wifi_set_mode(WIFI_MODE_STA);
-    }
-    if (error == ESP_OK) {
-        error = esp_wifi_set_config(WIFI_IF_STA, &config);
-    }
-    if (error != ESP_OK) {
-        (void)esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event);
-        (void)esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event);
-        (void)esp_wifi_deinit();
-        esp_netif_destroy_default_wifi(netif);
-        vEventGroupDelete(ctx.wifi_events);
-        ctx.wifi_events = NULL;
-        return error;
-    }
-    ctx.wifi_ready = true;
-    return ESP_OK;
-}
-
-static esp_err_t connect_wifi(void)
-{
-    esp_err_t error = wifi_init();
-    if (error != ESP_OK) {
-        return error;
-    }
-    xEventGroupClearBits(ctx.wifi_events, WIFI_CONNECTED);
-    xEventGroupSetBits(ctx.wifi_events, WIFI_ENABLED);
-    error = esp_wifi_start();
-    if (error != ESP_OK) {
-        return error;
-    }
-    EventBits_t bits = xEventGroupWaitBits(ctx.wifi_events, WIFI_CONNECTED, pdFALSE, pdTRUE, pdMS_TO_TICKS(30000));
-    return bits & WIFI_CONNECTED ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 static esp_err_t send_segment(const audio_upload_snapshot_t *snapshot, uint32_t sequence,
@@ -316,17 +205,14 @@ static void upload_worker(void *arg)
     for (;;) {
         xQueueReceive(ctx.queue, &snapshot, portMAX_DELAY);
         publish(AUDIO_UPLOAD_CONNECTING, 0);
-        esp_err_t error = connect_wifi();
+        esp_err_t error = terminal_network_acquire();
         if (error == ESP_OK) {
             ESP_LOGI(TAG, "Wi-Fi connected; free internal=%u, largest internal block=%u",
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
             publish(AUDIO_UPLOAD_SENDING, 0);
             error = upload_snapshot(&snapshot);
-        }
-        if (ctx.wifi_ready) {
-            xEventGroupClearBits(ctx.wifi_events, WIFI_ENABLED | WIFI_CONNECTED);
-            (void)esp_wifi_stop();
+            terminal_network_release();
         }
         ESP_LOGI(TAG, "Upload %s: %s", error == ESP_OK ? "accepted" : "failed", esp_err_to_name(error));
         publish(error == ESP_OK ? AUDIO_UPLOAD_ACCEPTED : AUDIO_UPLOAD_FAILED, audio_upload_get_status().sent_segments);
