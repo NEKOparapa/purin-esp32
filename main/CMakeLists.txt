@@ -3,7 +3,8 @@ if(NOT IDF_TARGET STREQUAL "esp32s3")
 endif()
 
 idf_component_register(SRCS "app_main.c" "ui/home_screen.c" "ui/agent_screen.c"
-                            "agent/terminal_network.c" "agent/terminal_http.c" "ui/notice_screen.c" "agent/notice_file.c" "agent/agent_client.c"
+                            "agent/terminal_network.c" "agent/terminal_http.c" "agent/terminal_tools.c"
+                            "ui/notice_screen.c" "agent/notice_file.c" "agent/agent_client.c"
                             "recording/recorder.c" "upload/audio_upload.c"
                        PRIV_REQUIRES board lvgl_port audio_capture recording_storage esp_timer
                                      esp_http_client esp_wifi esp_netif nvs_flash mbedtls esp_event json

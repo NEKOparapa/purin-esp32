@@ -236,6 +236,10 @@ $env:Path = 'D:\Espressif\python_env\idf5.5_py3.11_env\Scripts;' + $env:Path
 工程提供 `sdkconfig`、`sdkconfig.defaults` 和 `partitions.csv`，全新目标配置使用 `idf.py set-target esp32s3`。
 首次构建会下载锁定版本的 LVGL、触摸及 Opus 组件。字体和对话功能使 factory 分区从 2 MiB 扩为 5 MiB。首次升级应使用 `idf.py flash` 同步更新分区表和应用；NVS、PHY 起始位置保持原布局，无需擦除整片 Flash。
 
+## 主 Agent 查询设备状态
+
+在 `config/upload_config.local.h` 中填入 HTTPS 服务地址和设备凭据，设置 `#define WINTERMUTE_DEVICE_STATUS_ENABLED 1` 后编译、刷写。设备在 Agent 网络任务空闲时每 6 秒领取一次请求，提供 `device_status`，参数为 `{}`。返回的 JSON 包含板型、芯片、核心数、运行秒数和空闲堆内存字节数。设备在 NVS 中暂存待确认的结果，断网或重启后使用同一份结果重试。
+
 ## 验证
 
 本次新增的上传主机测试直接编译生产按键逻辑、索引读取校验和 `recording_writer.c`，

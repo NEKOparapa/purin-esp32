@@ -1,5 +1,6 @@
 #include "agent_client.h"
 #include "terminal_network.h"
+#include "terminal_tools.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -238,8 +239,17 @@ static void worker(void *arg)
 {
     (void)arg;
     command_t cmd;
+    const bool accept_tools = terminal_tools_enabled();
+    const TickType_t period = pdMS_TO_TICKS(6000);
+    TickType_t last_poll = xTaskGetTickCount() - period;
     for (;;) {
-        xQueueReceive(requests, &cmd, portMAX_DELAY);
+        TickType_t elapsed = xTaskGetTickCount() - last_poll;
+        TickType_t wait = accept_tools ? (elapsed < period ? period - elapsed : 0) : portMAX_DELAY;
+        if (xQueueReceive(requests, &cmd, wait) != pdTRUE) {
+            if (accept_tools) terminal_tools_poll(journal);
+            last_poll = xTaskGetTickCount();
+            continue;
+        }
         agent_result_t *result = calloc(1, sizeof(*result));
         if (result) execute(&cmd, result);
         xQueueSend(responses, &result, portMAX_DELAY);

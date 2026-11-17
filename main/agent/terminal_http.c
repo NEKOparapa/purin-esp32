@@ -39,6 +39,7 @@ typedef struct {
     char *data;
     size_t len;
     size_t cap;
+    size_t limit;
     bool failed;
 } response_buffer_t;
 
@@ -49,7 +50,7 @@ static esp_err_t receive_http(esp_http_client_event_t *event)
         return ESP_OK;
     }
     size_t needed = buf->len + (size_t)event->data_len + 1;
-    if (needed > MAX_RESPONSE) {
+    if (needed > buf->limit) {
         buf->failed = true;
         return ESP_FAIL;
     }
@@ -57,8 +58,8 @@ static esp_err_t receive_http(esp_http_client_event_t *event)
         size_t cap = buf->cap ? buf->cap * 2 : 1024;
         if (cap < needed)
             cap = needed;
-        if (cap > MAX_RESPONSE)
-            cap = MAX_RESPONSE;
+        if (cap > buf->limit)
+            cap = buf->limit;
         char *next = realloc(buf->data, cap);
         if (!next) {
             buf->failed = true;
@@ -76,7 +77,14 @@ static esp_err_t receive_http(esp_http_client_event_t *event)
 cJSON *terminal_http_json(char *message, size_t size, esp_http_client_method_t method,
                           const char *path, const cJSON *body, int expected)
 {
-    response_buffer_t buffer = {0};
+    return terminal_http_json_bounded(message, size, method, path, body, expected, MAX_RESPONSE, NULL);
+}
+
+cJSON *terminal_http_json_bounded(char *message, size_t size, esp_http_client_method_t method,
+                                  const char *path, const cJSON *body, int expected,
+                                  size_t limit, int *status_code)
+{
+    response_buffer_t buffer = {.limit = limit};
     cJSON *json = NULL;
     char *encoded = body ? cJSON_PrintUnformatted(body) : NULL;
     esp_http_client_handle_t http = terminal_http_client(path, method, receive_http, &buffer);
@@ -88,6 +96,7 @@ cJSON *terminal_http_json(char *message, size_t size, esp_http_client_method_t m
     if (error == ESP_OK)
         error = esp_http_client_perform(http);
     int status = http ? esp_http_client_get_status_code(http) : 0;
+    if (status_code) *status_code = status;
     if (buffer.failed) {
         strlcpy(message, "Response too large for device", size);
     } else if (error != ESP_OK) {

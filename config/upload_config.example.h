@@ -8,3 +8,5 @@
 #define WINTERMUTE_SERVER_URL ""
 #define WINTERMUTE_TERMINAL_ID "esp32-recorder"
 #define WINTERMUTE_TERMINAL_TOKEN ""
+// 设为 1 后向主 Agent 提供只读的 device_status 工具。
+#define WINTERMUTE_DEVICE_STATUS_ENABLED 0
