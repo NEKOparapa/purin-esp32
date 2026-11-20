@@ -61,6 +61,8 @@ esp_err_t board_init(void)
     delay_ms(20);
     ESP_RETURN_ON_ERROR(tca9555_configure_outputs(expander, BOARD_IO_SCREEN_POWER_MASK,
                                                 BOARD_IO_SCREEN_POWER_MASK), TAG, "screen/card power");
+    ESP_RETURN_ON_ERROR(tca9555_configure_inputs(expander, BOARD_IO_VOLUME_DOWN_MASK |
+                                                BOARD_IO_VOLUME_UP_MASK), TAG, "volume keys");
     delay_ms(100);
     const gpio_config_t boot = {
         .pin_bit_mask = 1ULL << BOARD_BOOT_GPIO,
@@ -70,6 +72,7 @@ esp_err_t board_init(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&boot), TAG, "BOOT button");
+    board_clock_init(board_bus);
     initialized = true;
     ESP_LOGI(TAG, "TCA9555: main/screen power ON, USB=debug, PA=off");
     return ESP_OK;
@@ -78,6 +81,23 @@ esp_err_t board_init(void)
 bool board_boot_pressed(void)
 {
     return initialized && gpio_get_level(BOARD_BOOT_GPIO) == 0;
+}
+
+esp_err_t board_volume_key(int *direction)
+{
+    if (!initialized) return ESP_ERR_INVALID_STATE;
+    uint16_t values;
+    esp_err_t err = tca9555_read_inputs(expander, &values);
+    if (err == ESP_OK) {
+        *direction = !(values & BOARD_IO_VOLUME_UP_MASK) -
+                     !(values & BOARD_IO_VOLUME_DOWN_MASK);
+    }
+    return err;
+}
+
+esp_err_t board_set_speaker_power(bool on)
+{
+    return tca9555_write_outputs(expander, BOARD_IO_PA_ENABLE_MASK, on ? BOARD_IO_PA_ENABLE_MASK : 0);
 }
 
 esp_err_t board_touch_init(cst816s_touch_handle_t *touch, board_touch_orientation_t *orientation)

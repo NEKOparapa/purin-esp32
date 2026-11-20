@@ -11,6 +11,7 @@
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -33,8 +34,12 @@ typedef struct {
 
 static QueueHandle_t requests;
 static QueueHandle_t responses;
+static SemaphoreHandle_t state_lock;
+static char desired_recorder_state[32];
+static char reported_recorder_state[32];
+static bool recorder_state_dirty;
 static bool busy;
-static agent_result_t no_memory = {.status = "Out of memory. Tap Retry"};
+static agent_result_t no_memory = {.status = "Out of memory. Tap 刷新"};
 static nvs_handle_t journal;
 
 static void make_id(char id[33])
@@ -75,11 +80,20 @@ static bool valid_id(const char *id)
            strspn(id, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") == strlen(id);
 }
 
+static bool has_reply_id(const agent_result_t *result, const char *id)
+{
+    for (const agent_reply_t *r = result->replies; r; r = r->next) {
+        if (!strcmp(r->id, id)) return true;
+    }
+    return false;
+}
+
 static bool extract_replies(const cJSON *json, agent_result_t *result)
 {
     const cJSON *outputs = cJSON_GetObjectItemCaseSensitive(json, "outputs");
     if (!cJSON_IsArray(outputs)) return false;
     agent_reply_t **tail = &result->replies;
+    while (*tail) tail = &(*tail)->next;
     const cJSON *item = NULL;
     cJSON_ArrayForEach(item, outputs) {
         const char *id = field(item, "output_id");
@@ -87,6 +101,7 @@ static bool extract_replies(const cJSON *json, agent_result_t *result)
         const char *status = field(item, "status");
         const char *layer = field(item, "layer");
         if (!valid_id(id) || !text || !status || !layer) return false;
+        if (has_reply_id(result, id)) continue;
         agent_reply_t *reply = calloc(1, sizeof(*reply));
         if (!reply) return false;
         *tail = reply;
@@ -100,20 +115,48 @@ static bool extract_replies(const cJSON *json, agent_result_t *result)
     return true;
 }
 
-static void inbox(agent_result_t *result)
+static void ack_unread_replies(agent_result_t *result)
 {
-    cJSON *json = request(result, HTTP_METHOD_GET, "/v1/outputs?limit=1", NULL, 200);
+    char ignored_status[64];
+    for (agent_reply_t *r = result->replies; r; r = r->next) {
+        if (!r->unread || !valid_id(r->id)) continue;
+        char path[128];
+        snprintf(path, sizeof(path), "/v1/outputs/%.*s/ack", AGENT_ID_BYTES - 1, r->id);
+        cJSON *receipt = terminal_http_json(ignored_status, sizeof(ignored_status),
+                                            HTTP_METHOD_POST, path, NULL, 200);
+        if (receipt) {
+            r->unread = false;
+            result->acknowledged = true;
+            cJSON_Delete(receipt);
+        }
+    }
+}
+
+static void fetch_inbox(agent_result_t *result, bool update_status)
+{
+    char tmp_status[112] = {0};
+    cJSON *json = terminal_http_json(
+        update_status ? result->status : tmp_status,
+        update_status ? sizeof(result->status) : sizeof(tmp_status),
+        HTTP_METHOD_GET, "/v1/outputs?limit=5", NULL, 200);
     if (!json) return;
-    const char *label = "Cannot read inbox";
-    if (extract_replies(json, result)) label = result->replies ? "Unread reply" : "Inbox is clear";
-    strlcpy(result->status, label, sizeof(result->status));
+    bool ok = extract_replies(json, result);
     cJSON_Delete(json);
+    if (ok) {
+        ack_unread_replies(result);
+        if (update_status) {
+            strlcpy(result->status, result->replies ? "已同步最新回复" : "已是最新状态",
+                    sizeof(result->status));
+        }
+    } else if (update_status) {
+        strlcpy(result->status, "无法读取最新回复", sizeof(result->status));
+    }
 }
 
 static void sync_turn(agent_result_t *result, turn_t *turn)
 {
     if (!turn->id[0]) {
-        inbox(result);
+        fetch_inbox(result, true);
         return;
     }
     strlcpy(result->message_id, turn->id, sizeof(result->message_id));
@@ -132,12 +175,12 @@ static void sync_turn(agent_result_t *result, turn_t *turn)
         if (valid) strlcpy(turn->job, id, sizeof(turn->job));
         cJSON_Delete(receipt);
         if (!valid || !store("turn", turn, sizeof(*turn))) {
-            strlcpy(result->status, "Cannot save job. Tap Retry", sizeof(result->status));
+            strlcpy(result->status, "保存任务失败，请点击刷新重试", sizeof(result->status));
             return;
         }
         result->sent = true;
         result->poll_job = true;
-        strlcpy(result->status, "Sent. Waiting for Agent", sizeof(result->status));
+        strlcpy(result->status, "已发送，等待 Agent 回复...", sizeof(result->status));
         return;
     }
     char path[128];
@@ -146,54 +189,92 @@ static void sync_turn(agent_result_t *result, turn_t *turn)
     if (!job) return;
     const char *status = field(job, "status");
     if (!status || !extract_replies(job, result)) {
-        strlcpy(result->status, "Cannot read job. Tap Retry", sizeof(result->status));
+        strlcpy(result->status, "读取任务失败，请点击刷新", sizeof(result->status));
     } else if (!strcmp(status, "queued") || !strcmp(status, "running")) {
         result->poll_job = true;
-        strlcpy(result->status, "Waiting for Agent", sizeof(result->status));
+        strlcpy(result->status, "Agent 正在思考...", sizeof(result->status));
     } else if (!strcmp(status, "completed")) {
-        strlcpy(result->status, result->replies ? "Reply received" : "Finished without text", sizeof(result->status));
+        ack_unread_replies(result);
+        // Also pull any other pending inbox outputs in the same refresh cycle.
+        fetch_inbox(result, false);
+        strlcpy(result->status, result->replies ? "已收到回复" : "已完成", sizeof(result->status));
     } else {
-        snprintf(result->status, sizeof(result->status), "Job %s", status);
+        snprintf(result->status, sizeof(result->status), "任务状态：%s", status);
+        fetch_inbox(result, false);
     }
     cJSON_Delete(job);
 }
 
-static void share_state(agent_result_t *result, const char *state)
+static bool share_state_silent(const char *state)
 {
     capture_t capture = {0};
-    if (!load("capture", &capture, sizeof(capture))) return;
+    if (!load("capture", &capture, sizeof(capture))) return false;
     if (!capture.id[0] || strcmp(state, capture.state)) {
         make_id(capture.id);
         strlcpy(capture.state, state, sizeof(capture.state));
-        if (!store("capture", &capture, sizeof(capture))) return;
+        if (!store("capture", &capture, sizeof(capture))) return false;
     }
+    char ignored[64];
     cJSON *body = cJSON_CreateObject();
     cJSON *receipt = NULL;
     if (cJSON_AddStringToObject(body, "event_id", capture.id) &&
         cJSON_AddStringToObject(body, "state_key", "recorder.state") &&
         cJSON_AddStringToObject(body, "value", capture.state)) {
-        receipt = request(result, HTTP_METHOD_POST, "/v1/perceptions", body, 202);
+        receipt = terminal_http_json(ignored, sizeof(ignored), HTTP_METHOD_POST,
+                                     "/v1/perceptions", body, 202);
     }
     cJSON_Delete(body);
-    if (!receipt) return;
-    if (field(receipt, "event_id") && nvs_erase_key(journal, "capture") == ESP_OK && nvs_commit(journal) == ESP_OK) {
-        snprintf(result->status, sizeof(result->status), "Shared recorder state: %s", capture.state);
+    if (!receipt) return false;
+    bool ok = field(receipt, "event_id") != NULL;
+    if (ok && nvs_erase_key(journal, "capture") == ESP_OK) {
+        (void)nvs_commit(journal);
     }
     cJSON_Delete(receipt);
+    return ok;
+}
+
+static void flush_recorder_state(void)
+{
+    if (!state_lock || !terminal_configured()) return;
+    char state[32] = {0};
+    bool dirty = false;
+    xSemaphoreTake(state_lock, portMAX_DELAY);
+    if (recorder_state_dirty && desired_recorder_state[0] &&
+        strcmp(desired_recorder_state, reported_recorder_state) != 0) {
+        strlcpy(state, desired_recorder_state, sizeof(state));
+        dirty = true;
+    } else {
+        recorder_state_dirty = false;
+    }
+    xSemaphoreGive(state_lock);
+
+    if (!dirty) return;
+    if (terminal_network_acquire() != ESP_OK) return;
+    bool ok = share_state_silent(state);
+    terminal_network_release();
+    if (ok) {
+        xSemaphoreTake(state_lock, portMAX_DELAY);
+        strlcpy(reported_recorder_state, state, sizeof(reported_recorder_state));
+        if (strcmp(desired_recorder_state, reported_recorder_state) == 0) {
+            recorder_state_dirty = false;
+        }
+        xSemaphoreGive(state_lock);
+    }
 }
 
 static void execute(const command_t *cmd, agent_result_t *result)
 {
-    strlcpy(result->status, "Device storage or memory unavailable", sizeof(result->status));
+    strlcpy(result->status, "设备存储不可用", sizeof(result->status));
     if (!terminal_configured()) {
-        strlcpy(result->status, "Set Wi-Fi, server and token in device config", sizeof(result->status));
+        strlcpy(result->status, terminal_network_mode() == TERMINAL_NETWORK_OFF
+            ? "请先在网络设置中开启连接" : "请检查固件中的网络和服务配置", sizeof(result->status));
         return;
     }
     turn_t turn = {0};
     if (!load("turn", &turn, sizeof(turn))) return;
     if (cmd->action == AGENT_SEND) {
         if (turn.id[0] && !turn.job[0] && strcmp(turn.question, cmd->value)) {
-            strlcpy(result->status, "Retry your saved message first", sizeof(result->status));
+            strlcpy(result->status, "请先点击刷新重发上一条消息", sizeof(result->status));
             return;
         }
         if (!turn.id[0] || turn.job[0]) {
@@ -205,31 +286,13 @@ static void execute(const command_t *cmd, agent_result_t *result)
     }
     esp_err_t error = terminal_network_acquire();
     if (error != ESP_OK) {
-        strlcpy(result->status, "Wi-Fi unavailable. Try again", sizeof(result->status));
+        strlcpy(result->status, "无法联网，请在网络设置中查看状态", sizeof(result->status));
         return;
     }
     switch (cmd->action) {
     case AGENT_SEND:
     case AGENT_SYNC:
         sync_turn(result, &turn);
-        break;
-    case AGENT_INBOX:
-        inbox(result);
-        break;
-    case AGENT_READ:
-        if (valid_id(cmd->value)) {
-            char path[128];
-            snprintf(path, sizeof(path), "/v1/outputs/%.*s/ack", AGENT_ID_BYTES-1, cmd->value);
-            cJSON *receipt = request(result, HTTP_METHOD_POST, path, NULL, 200);
-            if (receipt) {
-                result->acknowledged = true;
-                cJSON_Delete(receipt);
-                inbox(result);
-            }
-        }
-        break;
-    case AGENT_CAPTURE:
-        share_state(result, cmd->value);
         break;
     }
     terminal_network_release();
@@ -240,19 +303,36 @@ static void worker(void *arg)
     (void)arg;
     command_t cmd;
     const bool accept_tools = terminal_tools_enabled();
-    const TickType_t period = pdMS_TO_TICKS(6000);
-    TickType_t last_poll = xTaskGetTickCount() - period;
+    const TickType_t tool_period = pdMS_TO_TICKS(6000);
+    const TickType_t state_period = pdMS_TO_TICKS(1500);
+    TickType_t last_tool_poll = xTaskGetTickCount() - tool_period;
     for (;;) {
-        TickType_t elapsed = xTaskGetTickCount() - last_poll;
-        TickType_t wait = accept_tools ? (elapsed < period ? period - elapsed : 0) : portMAX_DELAY;
-        if (xQueueReceive(requests, &cmd, wait) != pdTRUE) {
-            if (accept_tools) terminal_tools_poll(journal);
-            last_poll = xTaskGetTickCount();
-            continue;
+        bool has_state = false;
+        if (state_lock) {
+            xSemaphoreTake(state_lock, portMAX_DELAY);
+            has_state = recorder_state_dirty;
+            xSemaphoreGive(state_lock);
         }
-        agent_result_t *result = calloc(1, sizeof(*result));
-        if (result) execute(&cmd, result);
-        xQueueSend(responses, &result, portMAX_DELAY);
+
+        TickType_t wait = portMAX_DELAY;
+        if (accept_tools) {
+            TickType_t elapsed = xTaskGetTickCount() - last_tool_poll;
+            wait = elapsed < tool_period ? tool_period - elapsed : 0;
+        }
+        if (has_state && (wait == portMAX_DELAY || state_period < wait)) {
+            wait = state_period;
+        }
+
+        if (xQueueReceive(requests, &cmd, wait) == pdTRUE) {
+            agent_result_t *result = calloc(1, sizeof(*result));
+            if (result) execute(&cmd, result);
+            xQueueSend(responses, &result, portMAX_DELAY);
+        }
+        flush_recorder_state();
+        if (accept_tools && (xTaskGetTickCount() - last_tool_poll) >= tool_period) {
+            terminal_tools_poll(journal);
+            last_tool_poll = xTaskGetTickCount();
+        }
     }
 }
 
@@ -263,13 +343,30 @@ esp_err_t agent_client_init(void)
     if (error != ESP_OK) return error;
     requests = xQueueCreate(1, sizeof(command_t));
     responses = xQueueCreate(1, sizeof(agent_result_t *));
-    if (requests && responses && xTaskCreate(worker, "agent", 10240, NULL, 1, NULL) == pdPASS) return ESP_OK;
+    state_lock = xSemaphoreCreateMutex();
+    if (requests && responses && state_lock &&
+        xTaskCreate(worker, "agent", 10240, NULL, 1, NULL) == pdPASS) {
+        return ESP_OK;
+    }
     if (requests) vQueueDelete(requests);
     if (responses) vQueueDelete(responses);
+    if (state_lock) vSemaphoreDelete(state_lock);
     requests = NULL;
     responses = NULL;
+    state_lock = NULL;
     nvs_close(journal);
     return ESP_ERR_NO_MEM;
+}
+
+void agent_client_report_recorder_state(const char *state)
+{
+    if (!state_lock || !state || !*state) return;
+    xSemaphoreTake(state_lock, portMAX_DELAY);
+    if (strcmp(desired_recorder_state, state) != 0) {
+        strlcpy(desired_recorder_state, state, sizeof(desired_recorder_state));
+        recorder_state_dirty = strcmp(desired_recorder_state, reported_recorder_state) != 0;
+    }
+    xSemaphoreGive(state_lock);
 }
 
 bool agent_client_start(agent_action_t action, const char *value)

@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 
 #include "terminal_network.h"
+#include "terminal_http.h"
 
 static const char *TAG = "audio_upload";
 enum { MAX_SEGMENT_BYTES = 4 * 1024 * 1024 };
@@ -105,9 +106,7 @@ static esp_err_t send_segment(const audio_upload_snapshot_t *snapshot, uint32_t 
         fclose(audio);
         return ESP_ERR_NO_MEM;
     }
-    char authorization[512];
-    length = snprintf(authorization, sizeof(authorization), "Bearer %s", WINTERMUTE_TERMINAL_TOKEN);
-    esp_err_t error = length < 0 || (size_t)length >= sizeof(authorization) ? ESP_ERR_INVALID_SIZE : ESP_OK;
+    esp_err_t error = terminal_set_auth_headers(client);
     char sequence_text[16], start_text[24], samples_text[24], minutes_text[16], elapsed_text[24];
     snprintf(sequence_text, sizeof(sequence_text), "%" PRIu32, sequence);
     snprintf(start_text, sizeof(start_text), "%" PRIu64, start);
@@ -117,10 +116,10 @@ static esp_err_t send_segment(const audio_upload_snapshot_t *snapshot, uint32_t 
     const uint64_t elapsed_samples = snapshot->elapsed_samples +
         (since_snapshot > 0 ? (uint64_t)since_snapshot * 16000 / 1000000 : 0);
     snprintf(elapsed_text, sizeof(elapsed_text), "%" PRIu64, elapsed_samples);
-    const char *keys[] = {"Content-Type", "X-Terminal-ID", "Authorization", "X-Recording-ID",
+    const char *keys[] = {"Content-Type", "X-Recording-ID",
                           "X-Segment-Sequence", "X-Start-Sample", "X-Sample-Count", "X-Sample-Rate", "X-Window-Minutes",
                           "X-Recording-Elapsed-Samples"};
-    const char *values[] = {"audio/ogg", WINTERMUTE_TERMINAL_ID, authorization, snapshot->recording_id,
+    const char *values[] = {"audio/ogg", snapshot->recording_id,
                             sequence_text, start_text, samples_text, "16000", minutes_text, elapsed_text};
     for (unsigned i = 0; error == ESP_OK && i < sizeof(keys) / sizeof(keys[0]); ++i) {
         error = esp_http_client_set_header(client, keys[i], values[i]);
@@ -207,7 +206,7 @@ static void upload_worker(void *arg)
         publish(AUDIO_UPLOAD_CONNECTING, 0);
         esp_err_t error = terminal_network_acquire();
         if (error == ESP_OK) {
-            ESP_LOGI(TAG, "Wi-Fi connected; free internal=%u, largest internal block=%u",
+            ESP_LOGI(TAG, "Network connected; free internal=%u, largest internal block=%u",
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
             publish(AUDIO_UPLOAD_SENDING, 0);
@@ -253,11 +252,13 @@ const char *audio_upload_status_text(audio_upload_state_t state)
 {
     switch (state) {
     case AUDIO_UPLOAD_PREPARING: return "Preparing audio";
-    case AUDIO_UPLOAD_CONNECTING: return "Connecting Wi-Fi";
+    case AUDIO_UPLOAD_CONNECTING: return "Connecting network";
     case AUDIO_UPLOAD_SENDING: return "Uploading audio";
     case AUDIO_UPLOAD_ACCEPTED: return "Audio accepted for processing";
     case AUDIO_UPLOAD_FAILED: return "Upload failed; tap BOOT to retry";
-    case AUDIO_UPLOAD_NOT_CONFIGURED: return "Configure Wi-Fi and upload server";
+    case AUDIO_UPLOAD_NOT_CONFIGURED:
+        return terminal_network_mode() == TERMINAL_NETWORK_OFF
+            ? "Enable network in Settings" : "Configure network and upload server";
     default: return "";
     }
 }

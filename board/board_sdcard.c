@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include "board_config.h"
 #include "esp_check.h"
+#include "esp_vfs_fat.h"
 #include "sdcard.h"
 
 static const char *TAG = "board_sdcard";
@@ -62,4 +63,18 @@ esp_err_t board_sdcard_unmount(void)
 const char *board_sdcard_path(void)
 {
     return board_card ? sdcard_mount_path(board_card) : NULL;
+}
+
+esp_err_t board_sdcard_read_usage(uint64_t *total_bytes, uint64_t *free_bytes)
+{
+    if (!total_bytes || !free_bytes) return ESP_ERR_INVALID_ARG;
+    board_sdcard_info_t info;
+    esp_err_t err = board_sdcard_mount(&info);
+    if (err != ESP_OK) return err;
+
+    err = esp_vfs_fat_info(board_sdcard_path(), total_bytes, free_bytes);
+    esp_err_t unmount_err = board_sdcard_unmount();
+    if (err != ESP_OK) return err;
+    if (*free_bytes > *total_bytes) return ESP_ERR_INVALID_RESPONSE;
+    return unmount_err;
 }

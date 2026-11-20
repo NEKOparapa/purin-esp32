@@ -5,11 +5,12 @@
 #include "driver/i2s_std.h"
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "soc/soc_caps.h"
 
-enum { FRAME_BYTES = 2 * sizeof(int32_t), DMA_FRAMES = 240, DMA_COUNT = 6 };
+enum { FRAME_BYTES = 2 * sizeof(int32_t), DMA_FRAMES = 240, DMA_FALLBACK_FRAMES = 160, DMA_COUNT = 6 };
 
 struct i2s_microphone_device {
     i2s_chan_handle_t rx;
@@ -17,6 +18,7 @@ struct i2s_microphone_device {
     uint8_t partial[FRAME_BYTES - 1];
     size_t partial_bytes;
     size_t dma_read_offset;
+    size_t dma_buffer_bytes;
     portMUX_TYPE lock;
     uint32_t received_bytes;
     uint32_t consumed_bytes;
@@ -32,7 +34,7 @@ static bool IRAM_ATTR on_receive(i2s_chan_handle_t channel, i2s_event_data_t *ev
     // IDF 在 RX 队列接近满时可能跳过当前 DMA 尾部，早于 q_ovf 回调。
     // 提前锁存危险积压，不能让这种跳帧伪装为连续录音。无符号差值允许计数回绕。
     if (mic->received_bytes - mic->consumed_bytes >=
-        (DMA_COUNT - 2U) * DMA_FRAMES * FRAME_BYTES) {
+        (DMA_COUNT - 2U) * mic->dma_buffer_bytes) {
         mic->data_lost = true;
     }
     portEXIT_CRITICAL_ISR(&mic->lock);
@@ -59,9 +61,11 @@ static bool consume_bytes(i2s_microphone_handle_t mic, size_t bytes)
     return lost;
 }
 
-esp_err_t i2s_microphone_create(const i2s_microphone_config_t *config,
-                               i2s_microphone_handle_t *out_handle)
+static esp_err_t create_microphone(const i2s_microphone_config_t *config, gpio_num_t dout,
+                                   i2s_chan_handle_t *tx, uint32_t dma_frames,
+                                   i2s_microphone_handle_t *out_handle)
 {
+    if (tx) *tx = NULL;
     if (!out_handle) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -80,10 +84,12 @@ esp_err_t i2s_microphone_create(const i2s_microphone_config_t *config,
         return ESP_ERR_NO_MEM;
     }
     mic->lock = (portMUX_TYPE)portMUX_INITIALIZER_UNLOCKED;
+    mic->dma_buffer_bytes = dma_frames * FRAME_BYTES;
     i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(config->port, I2S_ROLE_SLAVE);
     channel.dma_desc_num = DMA_COUNT;
-    channel.dma_frame_num = DMA_FRAMES;
-    esp_err_t err = i2s_new_channel(&channel, NULL, &mic->rx);
+    channel.dma_frame_num = dma_frames;
+    channel.auto_clear_after_cb = true;
+    esp_err_t err = i2s_new_channel(&channel, tx, &mic->rx);
     if (err != ESP_OK) {
         goto fail;
     }
@@ -94,10 +100,14 @@ esp_err_t i2s_microphone_create(const i2s_microphone_config_t *config,
             .mclk = I2S_GPIO_UNUSED,
             .bclk = config->bclk_gpio,
             .ws = config->ws_gpio,
-            .dout = I2S_GPIO_UNUSED,
+            .dout = dout,
             .din = config->din_gpio,
         },
     };
+    if (tx) {
+        err = i2s_channel_init_std_mode(*tx, &standard);
+        if (err != ESP_OK) goto fail;
+    }
     err = i2s_channel_init_std_mode(mic->rx, &standard);
     if (err != ESP_OK) {
         goto fail;
@@ -114,11 +124,32 @@ esp_err_t i2s_microphone_create(const i2s_microphone_config_t *config,
     return ESP_OK;
 
 fail:
+    if (tx && *tx) {
+        i2s_del_channel(*tx);
+        *tx = NULL;
+    }
     if (mic->rx) {
         i2s_del_channel(mic->rx);
     }
     heap_caps_free(mic);
     return err;
+}
+
+esp_err_t i2s_microphone_create(const i2s_microphone_config_t *config,
+                               i2s_microphone_handle_t *out_handle)
+{
+    esp_err_t err = create_microphone(config, I2S_GPIO_UNUSED, NULL, DMA_FRAMES, out_handle);
+    if (err == ESP_ERR_NO_MEM) {
+        ESP_LOGW("i2s_microphone", "Retrying RX with %u frames per DMA buffer", (unsigned)DMA_FALLBACK_FRAMES);
+        err = create_microphone(config, I2S_GPIO_UNUSED, NULL, DMA_FALLBACK_FRAMES, out_handle);
+    }
+    return err;
+}
+
+esp_err_t i2s_microphone_create_duplex(const i2s_microphone_config_t *config, gpio_num_t dout,
+                                      i2s_chan_handle_t *tx, i2s_microphone_handle_t *out_handle)
+{
+    return create_microphone(config, dout, tx, DMA_FRAMES, out_handle);
 }
 
 esp_err_t i2s_microphone_start(i2s_microphone_handle_t mic)
@@ -174,7 +205,7 @@ esp_err_t i2s_microphone_read(i2s_microphone_handle_t mic, int32_t *interleaved_
         // 每次不跨 DMA 块边界，IDF 内部最多等待一次新块，才能遵守总超时。
         // 逐块更新消费计数，避免大 read 误报积压。
         size_t chunk = requested - total;
-        const size_t dma_remaining = DMA_FRAMES * FRAME_BYTES - mic->dma_read_offset;
+        const size_t dma_remaining = mic->dma_buffer_bytes - mic->dma_read_offset;
         if (chunk > dma_remaining) {
             chunk = dma_remaining;
         }
@@ -182,7 +213,7 @@ esp_err_t i2s_microphone_read(i2s_microphone_handle_t mic, int32_t *interleaved_
         err = i2s_channel_read(mic->rx, output + total, chunk, &count,
                                (uint32_t)((remaining_us + 999) / 1000));
         total += count;
-        mic->dma_read_offset = (mic->dma_read_offset + count) % (DMA_FRAMES * FRAME_BYTES);
+        mic->dma_read_offset = (mic->dma_read_offset + count) % mic->dma_buffer_bytes;
         if (consume_bytes(mic, count)) {
             mic->partial_bytes = 0;
             return ESP_ERR_INVALID_SIZE;

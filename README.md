@@ -1,38 +1,46 @@
 # Wintermute ESP32 — Metalio E-Ink 4
 
-基于 ESP-IDF 5.5.4 的录音和 Agent 终端。主页可进入对话，BOOT 长按录音，短按选择并确认上传。
+基于 ESP-IDF 5.5.4 的录音和 Agent 设备。主页可进入对话，BOOT 长按录音，短按选择并确认上传。
 硬件为 ESP32-S3、16 MB Flash、Octal PSRAM、SSD1677 / GDEM0397T81 800×480 墨水屏。
 图形库为 LVGL 9.5.0，触摸使用官方 CST816S 1.0.6 组件。
 
 ## 启动与主页
 
 启动顺序：`app_main()` → `board_init()` → UI 任务 → `lvgl_port_init()` → `home_screen_create()`。
-主页采用 **480×800 竖屏**，显示录音和上传状态。触摸 **Agent chat** 打开对话。
+主页采用 **480×800 竖屏**。顶栏显示录音和上传状态，底部单行导航可进入「对话」「日程」「阅读」「设置」。待机时，表盘按分钟更新指针，下方显示数字时间、日期和星期。设备启动时从板载 PCF8563 读取北京时间，联网后通过 SNTP 校时并写回芯片。时钟掉电且尚未同步时在表盘中央显示「等待校时」，校时成功后自动显示指针和日期。
 
 ## 屏上对话与信息采集
 
+后端分层重构保留了固件使用的聊天、通知、感知、提问、设备工具和音频上传协议，本端不使用旧 `/v1/profile`。`WINTERMUTE_SERVER_URL` 填服务根地址，不添加 `/v1`。相邻 Wintermute 后端仓库的 `uv run python tools/check_clients.py` 可验证固件请求字段、响应结构、音频重试去重和设备隔离；该检查不连接或烧录实体设备，硬件功能仍需实机验证。
+
 - 触摸输入框，用屏幕键盘输入英文，点上方 **EN / 拼音** 切换输入法后可点选汉字，按 **Send** 发送。收到任务回执后，页面每 5 秒检查回复。上下滑动可阅读长文本。屏上使用 Noto Sans SC 的 GB2312 汉字子集，单次输入最多 192 字符。
 - **Retry** 重查最近一条问题。问题正文和客户端消息 ID 在发送前存入 NVS，任务 ID 收到后写回。断线或重启后再次进入可沿用原 ID 重试或读取最近任务。屏幕保留本次开机最近 16 条正文，跨重启保留最近问题和服务器任务引用。
-- **Inbox** 取本终端的一条未读输出；后台通知标注为 **Notification**。读完按 **Read / next** 显式确认并取下一条。查询或滚动本身保留服务端的未读状态。超过设备响应上限（单次 HTTP JSON 128 KiB）的内容会报告错误并保留在服务器。
+- **Inbox** 取本设备的一条未读输出；后台通知标注为 **Notification**。读完按 **Read / next** 显式确认并取下一条。查询或滚动本身保留服务端的未读状态。超过设备响应上限（单次 HTTP JSON 128 KiB）的内容会报告错误并保留在服务器。
 - **Share state** 读取点按时的实际录音器状态（空闲、启动、录制、保存或故障），以 `recorder.state` 提交至 `POST /v1/perceptions`。设备没有可信日历时钟，由后端记录接收时间。该操作只提交录音状态，会议声音沿用 BOOT 确认上传的音频切片路径。
-- 网络请求使用下文的设备配置和同一终端凭据。录音上传和聊天在独立后台任务上共享 Wi-Fi 连接锁。录音中短按 BOOT 可从聊天页返回上传确认面板。
+- 网络请求使用下文的设备配置和同一设备凭据。录音上传和聊天在独立后台任务上共享网络连接锁。录音中短按 BOOT 可从聊天页返回上传确认面板。
 
-### 收取通知和附件
+### 主页连接器响应
 
-主页的 **Notifications** 打开本设备的通知收件箱。闲置在主页时约每分钟检查一次，最新未读提醒的标题会显示在墨水屏上；进入收件箱后可点 **Latest** 查看全部、**Older** 翻看更早通知、**Mark read** 单独确认已读。提醒以服务端时间判断过期。
+提示卡片显示标题和正文预览，点「查看并确认」打开全文。倒计时显示剩余时分秒。卡片和倒计时并存时，最近启动的项目在主区域显示，另一项可从下方打开。
 
-一条通知可以带多份文件。点击某个文件名后，设备才会连接后端并将该文件分块保存到 FAT 格式 SD 卡的 `/Wintermute/` 目录，文件名前带有附件 ID。没有 SD 卡仍可以读通知和附件列表。录音占用 SD 卡时，请在录音结束后再次点选文件。按需保存沿用配置的服务器地址和本终端的访问凭据。
+Agent 调用震动器后，主页显示 10 秒震动提醒。实际震动时长取决于调用参数。收书或收章成功后，主页显示书名或章名，点「打开这本书」即可阅读。播放请求显示音频名称和播放状态，调用失败时显示原因。短暂提醒结束后恢复未读卡片、正在运行的计时器或待机时钟。状态查询只在响应区下方短暂显示结果提示。
 
-旧硬件测试页面、原始屏幕诊断、测试模式菜单及按键测试动作已移除。
-当前没有计数器、坐标展示、SD 读写测试或震动测试；BOOT 长按用于开始/停止录音，录音时短按进入上传确认。
 启动不挂载或写入 SD 卡，不触发震动；马达初始化保持关闭。
 上传确认页通过触摸选择时长和取消；确认上传仍需再次短按 BOOT。
 
-首页首帧全刷，静止时不反复刷屏。所有 LVGL 调用在同一个 UI 任务执行，
+首页首帧全刷，静止时不反复刷屏。LVGL 界面操作在同一个 UI 任务执行，
 实际 SPI/BUSY 等待由独立刷新任务完成。显示适配层将竖屏 I1 画布旋转为控制器
 原生 800×480 帧后发送；屏幕驱动和波形仍使用原生寻址。
 串口 `Startup complete: home screen ready` 表示主页已创建；
 `Frame ... FULL complete` 表示面板刷新流程完成，实际画面仍需实物确认。
+
+## 离线阅读
+
+- 将 UTF-8 编码的 `.txt` 文件复制到 SD 卡的 `Wintermute/Library/`。进入主页的「阅读」，在书架中选书。TXT 支持 UTF-8 BOM 和 Windows 换行，长文件分段读取。
+- 正文按 480×800 竖屏排版。音量减／加键、底部翻页按钮、轻点正文左右两侧或横向滑动均可翻页。Agent 推送的书可连续翻到相邻章节，也可用「上一章」「下一章」跳转。
+- 书签自动保存在设备中，重新打开书目会恢复阅读位置。Agent 书页显示章内页码，TXT 显示全书进度。Agent 工具继续使用每页 160 字的接口分页。
+
+分页和音量键交互参考 [Metalio E-Ink 4 阅读器](https://github.com/CloudZao/Metalio-E-INK4/blob/d12f481f4a42420634bb56a928f3959a977367d4/README.md#113-reader-book)。
 
 ## 分层目录
 
@@ -72,7 +80,7 @@ middleware/recording_storage/ PCM 分段保存与顺序索引
 main/                     应用层
   app_main.c              初始化与 UI 任务
   ui/                    录音主页、触屏对话、键盘和收件箱
-  agent/                 按需 Wi-Fi、HTTP 对话、状态采集和 NVS 恢复
+  agent/                 网络选择、HTTP 对话、状态采集和 NVS 恢复
   recording/             BOOT 判定、录音状态与模块协调
   upload/                不可变分段读取与后台音频上传
 ```
@@ -110,7 +118,7 @@ recording_storage：改名 → 追加并同步顺序索引
 | --- | --- |
 | 请求全刷 | `lvgl_port_request_full_refresh()`，仅 UI 任务调用 |
 | AI / BOOT 键状态 | `board_boot_pressed()`，GPIO0，应用消抖后长按 2 秒切换录音 |
-| 麦克风准备 | `board_microphone_init()`，停止采集后调用，返回借用句柄 |
+| 麦克风准备 | 持有音频独占权时调用 `board_microphone_init()` 获取借用句柄，停止采集后调用 `board_microphone_deinit()` 释放 I2S 通道 |
 | 录音控制 | `recorder_start()`、`recorder_stop()`，非阻塞；`recorder_get_status()` 获取快照 |
 | SD 挂载与路径 | `board_sdcard_mount()`、`board_sdcard_path()` |
 | SD 卸载 | 关闭所有文件后调用 `board_sdcard_unmount()` |
@@ -190,21 +198,30 @@ I2S0 使用从机 Philips 32-bit stereo RX，外置音频模块提供 16 kHz WS�
 
 ```powershell
 Copy-Item config/upload_config.example.h config/upload_config.local.h
-# 编辑 upload_config.local.h，填写 Wi-Fi、服务端地址、终端 ID、终端 token
+# 编辑 upload_config.local.h，填写服务端地址、设备 token 和 WINTERMUTE_DEVICE_NAME
 idf.py build
 ```
 
 `upload_config.local.h` 已忽略提交；凭据会编入固件。服务地址不带末尾 `/`，例如 `http://192.168.1.10:8080`。
-服务端 HTTP 必须监听设备可达的地址，并配置匹配的 `terminal_id` 和 token；用户、会话由服务端终端绑定决定。
-Wi-Fi 只在确认上传后启动，连接超时 30 秒，HTTP 每次网络操作超时 15 秒；完成或失败后关闭 Wi-Fi。
+服务端 HTTP 必须监听设备可达的地址，并配置匹配的 `device_id` 和 token；用户、会话由服务端设备绑定决定。
+### 网络设置
+
+在设备上打开「设置 → 网络」，选择 **Wi-Fi**、**移动网络**或**关闭**。选择保存在 NVS，切换会等当前网络操作结束再生效。默认选择 Wi-Fi。点选联网方式会尝试连接，成功后对话、连接器和上传共用该连接。
+
+选择 **Wi-Fi → 扫描 Wi-Fi**，在列表中选择附近的 2.4 GHz 网络。加密网络输入密码后点「连接」，开放网络可直接连接。取得 IP 地址后设备保存该网络，重启时会自动连接上次成功保存的 Wi-Fi。换网失败会保留之前的网络。已有编译期 Wi-Fi 配置的设备升级后仍可使用原配置，屏上成功配网后以新配置为准。
+
+移动网络使用板上的 NT26 4G 模块及 SIM 卡，由 UART1 和 MRDY/SRDY 握手接入 ESP-IDF 网络栈，沿用模组的默认 APN。板级接线和波特率参照 [Metalio 的 NT26 实现](https://github.com/CloudZao/Metalio-E-INK4/blob/d12f481f4a42420634bb56a928f3959a977367d4/main/boards/common/board/nt26_board.cc)。
+
+Wi-Fi 等待 IP 的超时为 30 秒，移动网络为 60 秒，单次 HTTP 操作的超时为 15 秒。如果服务地址是家中局域网地址，改用移动网络时需要换成移动网络可达的服务地址。
+
 HTTPS 使用 ESP-IDF 内置 CA 证书包验证主机证书，不跟随重定向；私有 CA 需自行加入证书包。
-未填写配置时显示 `Configure Wi-Fi and upload server`，不会尝试上传。
+未填写上传所需配置时显示「待配置上传」。
 
 每段以原始 Ogg 字节 `POST /v1/audio/slices`，包含 `Content-Type: audio/ogg`、`Content-Length` 及以下头：
 
 | 请求头 | 内容 |
 | --- | --- |
-| `X-Terminal-ID` / `Authorization` | 配置的终端 ID / `Bearer <token>` |
+| `X-Device-ID` / `Authorization` | 设备 ID 和独立的 Bearer 令牌。设备 ID 留空时使用 `esp32-<出厂 MAC>`，可从启动串口日志读取并登记到后端。 |
 | `X-Recording-ID` | 每次录音独立生成的 128-bit 随机 ID；同一场录音重试保持不变 |
 | `X-Segment-Sequence` | SD 索引的连续正整数分段号 |
 | `X-Start-Sample` / `X-Sample-Count` | 分段起点 / 精确真实样本数 |
@@ -212,7 +229,7 @@ HTTPS 使用 ESP-IDF 内置 CA 证书包验证主机证书，不跟随重定向�
 | `X-Window-Minutes` | 选择的 15/30/60/120，校验窗口上限，不参与去重 |
 | `X-Recording-Elapsed-Samples` | 快照累计样本加等待和发送前的单调时钟差，供服务端估算录音时间 |
 
-服务器按终端、录音 ID、分段号幂等接收；相同内容重复发送返回 202，不一致返回 409。
+服务器按设备、录音 ID、分段号幂等接收；相同内容重复发送返回 202，不一致返回 409。
 任一分段非 202 即停止本次上传，不删除 SD 文件。固件保持单段不超过五分钟、4 MiB。
 
 ## 编译与烧录
@@ -238,52 +255,32 @@ $env:Path = 'D:\Espressif\python_env\idf5.5_py3.11_env\Scripts;' + $env:Path
 
 ## 主 Agent 查询设备状态
 
-在 `config/upload_config.local.h` 中填入 HTTPS 服务地址和设备凭据，设置 `#define WINTERMUTE_DEVICE_STATUS_ENABLED 1` 后编译、刷写。设备在 Agent 网络任务空闲时每 6 秒领取一次请求，提供 `device_status`，参数为 `{}`。返回的 JSON 包含板型、芯片、核心数、运行秒数和空闲堆内存字节数。设备在 NVS 中暂存待确认的结果，断网或重启后使用同一份结果重试。
+在 `config/upload_config.local.h` 中填入 HTTPS 服务地址和设备凭据，设置 `#define WINTERMUTE_DEVICE_STATUS_ENABLED 1` 后编译、刷写。设备在 Agent 网络任务中约每 6 秒领取一次请求，提供 `device_status`，参数为 `{}`。返回的 JSON 包含板型、芯片、核心数、运行秒数和空闲堆内存字节数。设备在 NVS 中暂存待确认的结果，断网或重启后使用同一份结果重试。
 
-## 验证
+## ESP 设备连接器
 
-本次新增的上传主机测试直接编译生产按键逻辑、索引读取校验和 `recording_writer.c`，
-用可注入故障的存储/编码替身验证短长按隔离、快照不漂移、空段避免、卡满错误锁存和残缺索引拒绝：
+主页进入「设置 → 连接器」，点开应用即可本机试用。五个应用各有一个保存在设备上的远程连接开关，首次启动默认关闭。使用远程调用时，在上述本地配置中填写 HTTPS 服务地址和已绑定的设备凭据，构建并刷写后在设备上选择联网方式，再点所需应用右上角的「远程已关闭」开启远程调用。设备会向 Wintermute 同步应用名称和开关，各应用独立于 `WINTERMUTE_DEVICE_STATUS_ENABLED`。
 
-```powershell
-cmake -S tests/audio/upload -B build/audio-upload -G Ninja
-cmake --build build/audio-upload
-ctest --test-dir build/audio-upload --output-on-failure
+| 应用 | Agent 可调用的动作 | 设备表现与返回内容 |
+| --- | --- | --- |
+| 震动器 `esp_vibration` | `pulse`、`stop`、`status` | 一次短震 1–1000 毫秒，默认 100 毫秒。返回马达当前的开关状态。 |
+| 播放器 `esp_player` | `play`、`stop`、`status`、`list` | 省略文件名可试听内置双音，音量 1–100。将 16 kHz、16-bit PCM 单声道或双声道 WAV 放入 SD 卡的 `/Wintermute/Audio/`。文件名使用英文字母、数字、空格、点、下划线和连字符，以字母、数字、下划线或连字符开头。播放异步进行，查询可得到文件名、进度状态及错误原因。录音和播放共用音频硬件。 |
+| 提示卡片 `esp_card` | `show`、`status` | 发送标题（最多 48 字）和正文（最多 240 字）。最新卡片显示在墨水屏上，用户点「我看过了」后，Agent 可查询卡片 ID、标题及确认状态。重启保留最近一张卡片。 |
+| 计时器 `esp_timer` | `start`、`stop`、`status` | 单次倒计时 1 秒至 24 小时，再次启动会替换当前倒计时。返回名称、剩余秒数和状态。断网继续走时，重启清零。到时在屏幕提示，开启震动器连接后还会短震一次。 |
+| 阅读书库 `esp_library` | `add`、`append`、`list`、`read` | 将纯文本保存到 SD 卡的 `/Wintermute/Library/`。先用 `add` 建书，长文用 `append` 从第 2 章起依次追加，每章最多 2500 字，共可有 999 章。可列出 Agent 书目和按章、页读取。Agent 查阅页不会改变设备上的阅读位置。 |
+
+例如，对指定设备调用 `Mcp` 并传入下列参数，可启动 25 分钟专注计时。将 `<设备ID>` 替换为连接器列表中的设备 ID。
+
+```json
+{"action":"call","provider":"esp_timer@<设备ID>","tool":"esp_timer","args":{"action":"start","seconds":1500,"label":"专注"}}
 ```
 
-实机还需验证：录音不足 15 分钟时上传全量；超过 30 分钟后只上传所选前缀；
-上传中继续录音及长按停止；错误 token / 断网后的重试；四个时长的触摸选择及取消。
-主机测试和固件构建不等于已验证实机采集、Wi-Fi 并发性能或服务端真实 ASR。
+音频与书目列表每次最多返回四项。`has_more` 为真时将 `offset` 加四继续查询。书库返回的当前页、总页数和书签页码均从 1 开始。同一书目同一章可重试发送相同文本，提交不同文本会收到冲突错误。
 
-主机检查直接编译实际生产代码，输出放在 `build/`。在 Windows 的 Visual Studio 开发者终端中，
-确保 CMake/Ninja 可用，然后从项目根目录执行：
+## 录音诊断
 
-```powershell
-foreach ($suite in @('logic', 'microphone', 'capture', 'storage', 'writer')) {
-    cmake -S "tests/audio/$suite" -B "build/audio-$suite" -G Ninja
-    if ($LASTEXITCODE -ne 0) { throw "Configure failed: $suite" }
-    cmake --build "build/audio-$suite"
-    if ($LASTEXITCODE -ne 0) { throw "Build failed: $suite" }
-    ctest --test-dir "build/audio-$suite" --output-on-failure
-    if ($LASTEXITCODE -ne 0) { throw "Test failed: $suite" }
-}
-```
-
-- `logic`：启动按住屏蔽、消抖、2 秒阈值、单次触发、独立 PCM 混音/限幅。
-- `microphone`：实际驱动配合模拟 I2S，验证半帧拼接、超时、DMA 丢帧和重复启停。
-- `capture`：实际采集模块配合模拟任务与 I2S，验证短读、停止后排空、溢出、无音频及故障重试。
-- `storage`：目录递增、碰撞、索引顺序和文件大小校验；Windows 额外注入部分写入、卡满、同步失败。
-- `writer`：直接调用分段存储模块，验证一批 PCM 跨多段、两个五分钟整段和末段、空段避免、
-  异常中止，以及只有索引提交成功才推进保存计数；测试编码器用计数假实现，文件/索引执行实际代码。
-- `ogg`：实际 Opus 固定点源码及生产封装器，独立解析 CRC/页号并使用 FFmpeg 解码，
-  验证 300 秒、非整帧末段和极短音频时长及切片交界。运行方法见 `tests/audio/ogg/README.md`。
-
-实机验收：分别对左右麦克风发声确认两路均有效，连续录音超过 10 分钟后停止，
-应产生两个 300 秒分段及一个末段，索引样本位置连续，图标正确切换。
-另验证无卡/卡满、故障后重试和断电后已完成分段保留。
 串口 `Saved session ... segment ...` 只在音频和索引均保存成功后输出；停止日志给出
 编码/写卡耗时及任务剩余栈，启动日志给出内部 RAM/PSRAM 可用量。
-主机测试和固件编译不能替代实物接线、实际采样率、持续录音性能与供电异常验证。
 
 ## 硬件说明
 

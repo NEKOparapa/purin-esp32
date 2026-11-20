@@ -4,7 +4,7 @@
 #include "esp_err.h"
 
 enum { AGENT_INPUT_BYTES = 769, AGENT_ID_BYTES = 80 };
-typedef enum { AGENT_SEND, AGENT_SYNC, AGENT_INBOX, AGENT_READ, AGENT_CAPTURE } agent_action_t;
+typedef enum { AGENT_SEND, AGENT_SYNC } agent_action_t;
 
 typedef struct agent_reply {
     char id[AGENT_ID_BYTES];
@@ -29,3 +29,6 @@ esp_err_t agent_client_init(void);
 bool agent_client_start(agent_action_t action, const char *value);
 agent_result_t *agent_client_take_result(void);
 void agent_result_free(agent_result_t *result);
+
+// Background auto-report for recorder state changes (non-blocking, safe from UI task).
+void agent_client_report_recorder_state(const char *state);

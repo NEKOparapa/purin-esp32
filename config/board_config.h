@@ -98,7 +98,9 @@
 #define BOARD_BT_AUDIO_POWER_WAIT_MS 400         // 外设上电稳定等待
 #define BOARD_BT_AUDIO_MODE_WAIT_MS  700         // AT+RX=2 与 AT+MODE=1 之间的等待
 
-/* NT26 蜂窝通信模块，仅记录板上连接，当前固件未启用。 */
+/* NT26 串口网卡及 MRDY/SRDY 握手。 */
+#define BOARD_NT26_UART_PORT         UART_NUM_1
+#define BOARD_NT26_UART_BAUD         2000000
 #define BOARD_NT26_RX_GPIO           GPIO_NUM_11 // ESP32 UART 接收
 #define BOARD_NT26_TX_GPIO           GPIO_NUM_12 // ESP32 UART 发送
 #define BOARD_NT26_MRDY_GPIO         GPIO_NUM_21 // 主机就绪握手

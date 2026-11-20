@@ -1,4 +1,6 @@
-Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'
+chat_sc.ttf, home_controls.c: Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'
+calendar_serif.ttf: Copyright 2017-2023 Adobe (http://www.adobe.com/).
+Calendar subset derived from Noto Serif SC.
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

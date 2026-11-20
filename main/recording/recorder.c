@@ -104,7 +104,11 @@ static void run_session(void)
     mounted = true;
     err = board_microphone_init(&microphone);
     if (err != ESP_OK) {
-        failure = RECORDER_ERROR_MICROPHONE;
+        const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA;
+        ESP_LOGE(TAG, "Microphone preparation: %s (DMA free=%u, largest block=%u)",
+                 esp_err_to_name(err), (unsigned)heap_caps_get_free_size(caps),
+                 (unsigned)heap_caps_get_largest_free_block(caps));
+        failure = err == ESP_ERR_NO_MEM ? RECORDER_ERROR_MEMORY : RECORDER_ERROR_MICROPHONE;
         goto cleanup;
     }
     failure = writer_error(recording_writer_open(board_sdcard_path(),
@@ -235,6 +239,13 @@ cleanup:
     if (failure == RECORDER_ERROR_NONE) {
         failure = capture_error(input.error);
     }
+    if (microphone) {
+        err = board_microphone_deinit();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Release microphone: %s", esp_err_to_name(err));
+            if (failure == RECORDER_ERROR_NONE) failure = RECORDER_ERROR_MICROPHONE;
+        }
+    }
     if (writer) {
         recording_writer_stats_t stats;
         if (failure == RECORDER_ERROR_NONE) {
@@ -260,6 +271,7 @@ cleanup:
              recorder_error_text(failure), write_samples ? write_us * AUDIO_CAPTURE_FRAME_SAMPLES / write_samples : 0,
              (long long)max_write_us, (unsigned)uxTaskGetStackHighWaterMark(ctx.worker),
              (unsigned)audio_capture_stack_free(ctx.capture));
+    board_audio_release();
     publish_state(failure == RECORDER_ERROR_NONE ? RECORDER_IDLE : RECORDER_ERROR, failure);
 }
 
@@ -296,7 +308,8 @@ esp_err_t recorder_init(void)
 esp_err_t recorder_start(void)
 {
     portENTER_CRITICAL(&status_lock);
-    if (!ctx.worker || (ctx.status.state != RECORDER_IDLE && ctx.status.state != RECORDER_ERROR)) {
+    if (!ctx.worker || (ctx.status.state != RECORDER_IDLE && ctx.status.state != RECORDER_ERROR) ||
+        !board_audio_reserve()) {
         portEXIT_CRITICAL(&status_lock);
         return ESP_ERR_INVALID_STATE;
     }

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "driver/gpio.h"
 #include "driver/i2s_types.h"
+#include "driver/i2s_std.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -25,6 +26,9 @@ typedef struct {
 // 同一实例的全部接口由调用方串行执行；不允许 read 与 stop/destroy 并发。
 esp_err_t i2s_microphone_create(const i2s_microphone_config_t *config,
                                i2s_microphone_handle_t *out_handle);
+// Allocate paired channels with shared clocks. Caller owns the returned TX channel.
+esp_err_t i2s_microphone_create_duplex(const i2s_microphone_config_t *config, gpio_num_t dout,
+                                      i2s_chan_handle_t *tx, i2s_microphone_handle_t *out_handle);
 
 // 开始一次采集，丢弃上次停止时的残留；已经运行时返回 INVALID_STATE。
 esp_err_t i2s_microphone_start(i2s_microphone_handle_t handle);

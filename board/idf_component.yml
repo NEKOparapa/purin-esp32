@@ -1,0 +1,4 @@
+dependencies:
+  78/uart-eth-modem:
+    version: "0.6.0"
+    public: false

@@ -17,6 +17,14 @@ extern "C" {
  * 板级总线、面板、触摸资源持续到重启，不由上层删除借用句柄。
  */
 esp_err_t board_init(void);
+// Save the synchronized system clock to the board's battery-backed local clock.
+esp_err_t board_clock_store(void);
+
+// Waits for the NT26 to obtain an IP address. Start/stop run on a serialized
+// network worker after esp_netif and the default event loop are initialized.
+esp_err_t board_cellular_connect(void);
+void board_cellular_stop(void);
+bool board_cellular_connected(void);
 
 // 创建屏幕 SPI 和面板；面板 reset/init 由 LVGL 适配或原始诊断执行。
 esp_err_t board_display_init(esp_lcd_panel_handle_t *panel);
@@ -24,13 +32,22 @@ esp_err_t board_display_init(esp_lcd_panel_handle_t *panel);
 // BOOT 为低有效；board_init 成功后读取，消抖和按键动作由应用处理。
 bool board_boot_pressed(void);
 
-// 配置外置音频模块并创建从机双路 I2S RX；仅准备资源，不开始采集。
-// 每次调用重发模块模式指令，调用前须停止采集；可在失败恢复后重试。
-// 本接口会等待模块上电/模式切换，须在录音工作任务串行调用，不能阻塞 UI。
-// 资源持续到重启，返回借用句柄；应用仅调用 start/read/stop，不得 destroy。
+// -1 for volume down, +1 for volume up, 0 when neither or both are pressed.
+esp_err_t board_volume_key(int *direction);
+
+// 在持有音频独占权的工作任务中配置外置模块和双声道 I2S RX，不开始采集。
+// 返回借用句柄。停止采集后调用 board_microphone_deinit() 释放通道。
 esp_err_t board_microphone_init(i2s_microphone_handle_t *microphone);
+esp_err_t board_microphone_deinit(void);
 // 原板 32-bit 采样转换成 PCM16 的缩放位数；混音后再缩放/限幅。
 uint8_t board_microphone_pcm_shift(void);
+bool board_audio_reserve(void);
+void board_audio_release(void);
+// Caller holds the audio reservation for the complete record/play operation.
+// Stop playback to release the TX channel and its DMA buffers.
+esp_err_t board_speaker_start(void);
+esp_err_t board_speaker_write(const int32_t *stereo, size_t frames);
+esp_err_t board_speaker_stop(void);
 
 // 初始化马达输出为关闭状态，不产生启动震动；board_init 会调用，可串行重试。
 esp_err_t board_vibration_init(void);
@@ -68,6 +85,10 @@ esp_err_t board_sdcard_unmount(void);
 
 // 仅挂载成功后返回 VFS 路径；未挂载返回 NULL，卸载后路径借用失效。
 const char *board_sdcard_path(void);
+
+// Temporarily mounts the card through the same exclusive owner as recording and playback.
+// Run on a worker. ESP_ERR_INVALID_STATE means the card is already in use.
+esp_err_t board_sdcard_read_usage(uint64_t *total_bytes, uint64_t *free_bytes);
 
 #ifdef __cplusplus
 }

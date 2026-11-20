@@ -19,12 +19,6 @@
 # tool
 tools/
 
-# Local tests
-/tests/*
-!/tests/calendar/
-!/tests/audio/
-!/tests/metalio/
-
 # Build artifacts and directories
 **/build/
 build/

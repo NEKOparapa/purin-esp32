@@ -9,6 +9,44 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.0.5
+  78/uart-eth-modem:
+    component_hash: cb3e5cf3161499f795fe679254da92858e92a39e85d74b9ea58b225c4f0294f2
+    dependencies:
+    - name: 78/uart-uhci
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^0.3.0
+    - name: espressif/iot_eth
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^0.1.0
+    - name: idf
+      require: private
+      version: '>=5.5.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.6.0
+  78/uart-uhci:
+    component_hash: 0e391c695621ac725506166b908146a02e9cff26e6d36f8e43e7e63b5b1d200f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.5.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.3.3
+  espressif/cmake_utilities:
+    component_hash: afc935d5a93cda71ce3223b817de128d07484439d585e6fe613bde820e17f36a
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.4.1
   espressif/esp_lcd_touch:
     component_hash: 3f85a7d95af876f1a6ecca8eb90a81614890d0f03a038390804e5a77e2caf862
     dependencies:
@@ -33,6 +71,20 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.0.6
+  espressif/iot_eth:
+    component_hash: ffcea72f079264b6905e428a406cb6d2512dfede10d100c49d3486dd78dc1873
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.1.0
   idf:
     source:
       type: idf
@@ -46,9 +98,10 @@ dependencies:
     version: 9.5.0
 direct_dependencies:
 - 78/esp-opus
+- 78/uart-eth-modem
 - espressif/esp_lcd_touch_cst816s
 - idf
 - lvgl/lvgl
-manifest_hash: b1782a67501e4f3d02494df77ae3f7a3e1293a78e02090b70b2ca8ae9cf7757f
+manifest_hash: bb4368c8bf7888ef54044005d1f7aacca9cebc1869898b5a8da1cdb74f2bcf52
 target: esp32s3
 version: 2.0.0

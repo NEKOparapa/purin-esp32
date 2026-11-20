@@ -4,8 +4,24 @@
 #include <stdlib.h>
 #include <string.h>
 #include "esp_crt_bundle.h"
+#include "mbedtls/base64.h"
 
 enum { MAX_RESPONSE = 128 * 1024 };
+
+esp_err_t terminal_set_auth_headers(esp_http_client_handle_t client)
+{
+    const unsigned char name[] = WINTERMUTE_DEVICE_NAME;
+    unsigned char encoded[4 * ((sizeof(name) + 1) / 3) + 1];
+    size_t length;
+    if (mbedtls_base64_encode(encoded, sizeof(encoded), &length, name, sizeof(name) - 1) != 0)
+        return ESP_ERR_INVALID_ARG;
+    encoded[length] = 0;
+    esp_err_t rc = esp_http_client_set_header(client, "X-Device-ID", wintermute_device_id());
+    if (rc == ESP_OK) rc = esp_http_client_set_header(client, "X-Device-Instance", wintermute_device_instance_id());
+    if (rc == ESP_OK) rc = esp_http_client_set_header(client, "X-Device-Name", (const char *)encoded);
+    if (rc == ESP_OK) rc = esp_http_client_set_header(client, "Authorization", "Bearer " WINTERMUTE_DEVICE_TOKEN);
+    return rc;
+}
 
 esp_http_client_handle_t terminal_http_client(const char *path, esp_http_client_method_t method,
                                               http_event_handle_cb handler, void *data)
@@ -26,9 +42,7 @@ esp_http_client_handle_t terminal_http_client(const char *path, esp_http_client_
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client)
         return NULL;
-    if (esp_http_client_set_header(client, "X-Terminal-ID", WINTERMUTE_TERMINAL_ID) != ESP_OK ||
-        esp_http_client_set_header(client, "Authorization", "Bearer " WINTERMUTE_TERMINAL_TOKEN) !=
-            ESP_OK) {
+    if (terminal_set_auth_headers(client) != ESP_OK) {
         esp_http_client_cleanup(client);
         return NULL;
     }
