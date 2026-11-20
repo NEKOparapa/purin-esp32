@@ -7,6 +7,7 @@ idf_component_register(SRCS "app_main.c" "ui/eink_ui.c" "ui/home_screen.c" "ui/a
                             "ui/fonts/home_controls.c"
                             "agent/terminal_network.c" "agent/terminal_http.c" "agent/terminal_tools.c"
                             "agent/agent_client.c" "apps/device_apps.c" "apps/library.c"
+                            "apps/reading_progress.c"
                             "apps/player.c" "ui/device_apps_screen.c" "ui/reader_screen.c" "ui/reader_layout.c"
                             "recording/recorder.c" "upload/audio_upload.c"
                        PRIV_REQUIRES board lvgl_port audio_capture recording_storage esp_timer

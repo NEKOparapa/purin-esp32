@@ -3,6 +3,7 @@
 #include "eink_ui.h"
 #include "library.h"
 #include "reader_layout.h"
+#include "reading_progress.h"
 #include "terminal_tools.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -47,6 +48,7 @@ extern const uint8_t chat_sc_end[] asm("_binary_chat_sc_ttf_end");
 
 static lv_obj_t *screen, *back_screen, *shelf_bar, *page_bar, *shelf_panel, *page_panel;
 static lv_obj_t *status, *shelf_entries, *remote_label, *shelf_index, *page_title, *page_text, *progress;
+static lv_obj_t *shelf_refresh, *shelf_nav;
 static lv_obj_t *shelf_prev, *shelf_next, *page_prev, *page_next, *chapter_prev, *chapter_next;
 static const lv_font_t *reading_font;
 static QueueHandle_t jobs, results;
@@ -57,6 +59,8 @@ static uint32_t page, shelf_offset;
 static int text_width, text_height, text_lines;
 static int key_sample, key_stable;
 static bool key_ready, pending, reading, shelf_loaded, shelf_more;
+
+static void show_shelf_message(const char *title, const char *detail);
 
 static const lv_font_t *create_reader_font(void)
 {
@@ -122,6 +126,8 @@ static void enable(lv_obj_t *object, bool enabled)
 
 static void update_controls(void)
 {
+    show(shelf_nav, shelf_offset > 0 || shelf_more);
+    enable(shelf_refresh, !pending);
     enable(shelf_prev, !pending && shelf_offset > 0);
     enable(shelf_next, !pending && shelf_more);
     enable(page_prev, !pending && reading && (page > 0 || document.section.previous));
@@ -134,7 +140,11 @@ static void request(reader_action_t action, uint32_t number, const library_book_
 {
     if (pending) return;
     if (!jobs) {
-        lv_label_set_text(status, "阅读任务不可用");
+        if (action == LOAD_SHELF && !shelf_loaded) {
+            show_shelf_message("无法读取书架", "阅读任务不可用");
+        } else {
+            lv_label_set_text(status, "阅读任务不可用");
+        }
         return;
     }
     reader_job_t job = {.action = action, .generation = ++generation, .number = number,
@@ -143,7 +153,12 @@ static void request(reader_action_t action, uint32_t number, const library_book_
     xQueueOverwrite(jobs, &job);
     pending = true;
     update_controls();
-    lv_label_set_text(status, action == LOAD_SHELF ? "正在读取书目" : "正在打开正文");
+    if (action == LOAD_SHELF && !shelf_loaded) {
+        show_shelf_message("正在读取书架…", NULL);
+        lv_label_set_text(status, "");
+    } else {
+        lv_label_set_text(status, action == LOAD_SHELF ? "正在刷新书架…" : "正在打开正文");
+    }
 }
 
 static void update_remote(void)
@@ -170,13 +185,27 @@ static void show_view(bool open_book)
     update_controls();
 }
 
+static bool save_reading_update(void)
+{
+    if (!reading || page >= document.layout.count) return true;
+    return reading_progress_submit(&selected, &document.section,
+                                   document.layout.starts[page + 1], page + 1, document.layout.count);
+}
+
+static void on_screen_unload(lv_event_t *event)
+{
+    (void)event;
+    save_reading_update();
+}
+
 static void go_back(lv_event_t *event)
 {
     (void)event;
     ++generation;
     pending = false;
+    bool saved = save_reading_update();
     release_document(&document);
-    lv_label_set_text(status, "");
+    lv_label_set_text(status, saved ? "" : "阅读进度上报记录保存失败");
     if (reading) {
         lv_label_set_text(page_text, "");
         show_view(false);
@@ -320,14 +349,31 @@ static lv_obj_t *center_label(lv_obj_t *parent)
     return label;
 }
 
+static void show_shelf_message(const char *title, const char *detail)
+{
+    lv_obj_clean(shelf_entries);
+    lv_obj_t *message = column(shelf_entries, 12);
+    lv_obj_set_flex_grow(message, 1);
+    lv_obj_set_flex_align(message, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    eink_icon_reading(message, false);
+    eink_label(message, title, eink_heading_font(), LV_TEXT_ALIGN_CENTER);
+    if (detail && detail[0]) {
+        lv_obj_t *text = eink_label(message, detail, eink_small_font(), LV_TEXT_ALIGN_CENTER);
+        lv_obj_set_width(text, LV_PCT(100));
+        lv_label_set_long_mode(text, LV_LABEL_LONG_MODE_WRAP);
+    }
+}
+
 static void create_screen(void)
 {
     reading_font = create_reader_font();
     screen = lv_obj_create(NULL);
+    lv_obj_add_event_cb(screen, on_screen_unload, LV_EVENT_SCREEN_UNLOAD_START, NULL);
     eink_style_screen(screen);
     lv_obj_set_flex_flow(screen, LV_FLEX_FLOW_COLUMN);
     lv_obj_t *slot;
     shelf_bar = eink_top_bar_font(screen, "阅读书架", eink_heading_font(), go_back, &slot);
+    shelf_refresh = control(slot, "刷新", 64, 42, browse_clicked, 0);
     remote_label = lv_obj_get_child(control(slot, "", 128, 42, toggle_remote, 0), 0);
     page_bar = eink_top_bar_font(screen, "", eink_heading_font(), go_back, NULL);
     page_title = lv_obj_get_child(page_bar, 1);
@@ -336,14 +382,12 @@ static void create_screen(void)
     shelf_panel = column(screen, BODY_GAP);
     lv_obj_set_flex_grow(shelf_panel, 1);
     lv_obj_set_style_pad_all(shelf_panel, EINK_PAD_X, 0);
-    lv_obj_t *shelf_tools = row(shelf_panel, INFO_HEIGHT);
-    control(shelf_tools, "刷新书架", 120, 42, browse_clicked, 0);
-    shelf_index = center_label(shelf_tools);
     shelf_entries = column(shelf_panel, 12);
     lv_obj_set_flex_grow(shelf_entries, 1);
-    lv_obj_t *shelf_nav = row(shelf_panel, NAV_HEIGHT);
+    shelf_nav = row(shelf_panel, NAV_HEIGHT);
     lv_obj_set_flex_align(shelf_nav, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     shelf_prev = control(shelf_nav, "上一组", 120, 48, browse_clicked, -1);
+    shelf_index = center_label(shelf_nav);
     shelf_next = control(shelf_nav, "下一组", 120, 48, browse_clicked, 1);
 
     page_panel = column(screen, BODY_GAP);
@@ -380,16 +424,15 @@ static void create_screen(void)
 
 static void render_shelf(const reader_result_t *result)
 {
-    lv_obj_clean(shelf_entries);
     shelf_loaded = true;
     shelf_offset = result->job.number;
     shelf_more = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(result->shelf, "has_more"));
     const cJSON *items = cJSON_GetObjectItemCaseSensitive(result->shelf, "items");
     int count = cJSON_GetArraySize(items);
     if (!count) {
-        lv_obj_t *empty = eink_label(shelf_entries, "将 TXT 复制到 SD 卡 Wintermute/Library\n或让 Agent 推送一篇文章。",
-                                     eink_body_font(), LV_TEXT_ALIGN_LEFT);
-        lv_obj_set_width(empty, LV_PCT(100));
+        show_shelf_message("书架为空", "将 TXT 复制到 SD 卡 Wintermute/Library，或让 Agent 推送书籍。");
+    } else {
+        lv_obj_clean(shelf_entries);
     }
     for (int i = 0; i < count && i < LIBRARY_SHELF_PAGE_SIZE; ++i) {
         const cJSON *item = cJSON_GetArrayItem(items, i);
@@ -452,7 +495,10 @@ static void tick(lv_timer_t *timer)
             pending = false;
             if (result.shelf) render_shelf(&result);
             else if (result.document.layout.count) render_section(&result);
-            else lv_label_set_text(status, result.error);
+            else if (result.job.action == LOAD_SHELF && !shelf_loaded) {
+                show_shelf_message("无法读取书架", result.error);
+                lv_label_set_text(status, "");
+            } else lv_label_set_text(status, result.error);
             update_controls();
         }
         cJSON_Delete(result.shelf);

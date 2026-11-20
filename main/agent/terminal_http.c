@@ -19,6 +19,7 @@ esp_err_t terminal_set_auth_headers(esp_http_client_handle_t client)
     esp_err_t rc = esp_http_client_set_header(client, "X-Device-ID", wintermute_device_id());
     if (rc == ESP_OK) rc = esp_http_client_set_header(client, "X-Device-Instance", wintermute_device_instance_id());
     if (rc == ESP_OK) rc = esp_http_client_set_header(client, "X-Device-Name", (const char *)encoded);
+    if (rc == ESP_OK) rc = esp_http_client_set_header(client, "X-Device-Platform", WINTERMUTE_DEVICE_PLATFORM);
     if (rc == ESP_OK) rc = esp_http_client_set_header(client, "Authorization", "Bearer " WINTERMUTE_DEVICE_TOKEN);
     return rc;
 }

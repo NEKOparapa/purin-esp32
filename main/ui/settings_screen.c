@@ -4,23 +4,23 @@
 #include "eink_ui.h"
 #include "esp_flash.h"
 #include "lvgl_port.h"
+#include "reading_progress.h"
 #include "recorder.h"
-#include "terminal_http.h"
 #include "terminal_network.h"
 
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "mbedtls/platform_util.h"
+#include "nvs.h"
 
 enum { WIFI_SCAN_LIMIT = 16 };
 typedef enum {
-    SET_FETCH_KEYS, SET_FETCH_MEMORY, SET_NETWORK_MODE, SET_WIFI_SCAN, SET_WIFI_JOIN, SET_READ_STORAGE
+    SET_NETWORK_MODE, SET_WIFI_SCAN, SET_WIFI_JOIN, SET_READ_STORAGE
 } set_action_t;
 
 typedef struct {
@@ -34,7 +34,6 @@ typedef struct {
     set_action_t action;
     bool ok;
     char error[128];
-    cJSON *json;
     size_t ap_count;
     terminal_wifi_ap_t aps[WIFI_SCAN_LIMIT];
     terminal_wifi_join_result_t joined;
@@ -46,23 +45,19 @@ typedef struct {
 
 static lv_obj_t *home_ref;
 static lv_obj_t *index_scr;
-static lv_obj_t *conn_scr;
+static lv_obj_t *connection_scr;
+static lv_obj_t *network_scr;
 static lv_obj_t *wifi_scan_scr;
 static lv_obj_t *wifi_password_scr;
 static lv_obj_t *connectors_scr;
-static lv_obj_t *keys_scr;
-static lv_obj_t *memory_scr;
 static lv_obj_t *appearance_scr;
 static lv_obj_t *collection_scr;
 static lv_obj_t *storage_scr;
 
-static lv_obj_t *idx_conn_val;
+static lv_obj_t *idx_network_val;
 static lv_obj_t *idx_rec_val;
-static lv_obj_t *conn_status_val;
-static lv_obj_t *conn_device_val;
-static lv_obj_t *conn_id_val;
-static lv_obj_t *conn_url_val;
-static lv_obj_t *conn_wifi_val;
+static lv_obj_t *network_status_val;
+static lv_obj_t *wifi_name_val;
 static lv_obj_t *wifi_scan_button;
 static lv_obj_t *wifi_scan_status;
 static lv_obj_t *wifi_scan_list;
@@ -76,8 +71,10 @@ static terminal_wifi_ap_t wifi_aps[WIFI_SCAN_LIMIT];
 static terminal_wifi_ap_t wifi_selected_ap;
 static lv_obj_t *network_options[TERMINAL_NETWORK_OFF + 1];
 static lv_obj_t *rec_status_val;
-static lv_obj_t *keys_body;
-static lv_obj_t *memory_body;
+static lv_obj_t *recording_manual_button;
+static lv_obj_t *recording_auto_button;
+static lv_obj_t *recording_upload_note;
+static lv_obj_t *reading_upload_note;
 static lv_obj_t *flash_capacity_val;
 static lv_obj_t *sd_status_val;
 static lv_obj_t *sd_total_val;
@@ -88,6 +85,13 @@ static QueueHandle_t cmds, results;
 static bool busy;
 static bool network_pending;
 static bool network_save_failed;
+static bool recording_auto_upload;
+static bool reading_progress_upload;
+
+static const char recording_upload_key[] = "audio_auto";
+static const char recording_upload_hint[] =
+    "自动上传待实现。\n长按 BOOT 开始或停止录音。录音中短按 BOOT 选择时长，再次短按确认上传。";
+static const char reading_upload_hint[] = "退出阅读时上报有变化的进度。离线时会稍后重试。";
 
 static void render_wifi_scan(const set_res_t *res);
 static void render_wifi_join(const set_res_t *res);
@@ -103,13 +107,6 @@ static const char *recorder_label_zh(void)
     case RECORDER_ERROR: return "异常";
     default: return "就绪";
     }
-}
-
-static bool is_secure_server(void)
-{
-    return strncmp(WINTERMUTE_SERVER_URL, "https://", 8) == 0 ||
-           strncmp(WINTERMUTE_SERVER_URL, "http://localhost", 16) == 0 ||
-           strncmp(WINTERMUTE_SERVER_URL, "http://127.0.0.1", 16) == 0;
 }
 
 static void free_wifi_password(char *password)
@@ -141,31 +138,6 @@ static void settings_worker(void *unused)
         } else if (cmd.action == SET_READ_STORAGE) {
             res.ok = esp_flash_get_physical_size(NULL, &res.flash_bytes) == ESP_OK;
             res.sd_error = board_sdcard_read_usage(&res.sd_total_bytes, &res.sd_free_bytes);
-        } else if (terminal_network_mode() == TERMINAL_NETWORK_OFF) {
-            strlcpy(res.error, "请先在网络设置中开启连接", sizeof(res.error));
-        } else if (!terminal_configured()) {
-            strlcpy(res.error, "请先在固件中配置服务连接", sizeof(res.error));
-        } else if (cmd.action == SET_FETCH_KEYS && !is_secure_server()) {
-            strlcpy(res.error, "查看接口密钥需要 HTTPS 或本机连接", sizeof(res.error));
-        } else if (terminal_network_acquire() != ESP_OK) {
-            strlcpy(res.error, "无法联网，请在网络设置中查看状态", sizeof(res.error));
-        } else {
-            const char *route =
-                cmd.action == SET_FETCH_KEYS ? "/v1/settings/api-keys" : "/v1/memory/schedule";
-            int code = 0;
-            res.json = terminal_http_json_bounded(res.error, sizeof(res.error), HTTP_METHOD_GET,
-                                                  route, NULL, 200, 16384, &code);
-            if (res.json) {
-                res.ok = true;
-            } else if (code == 404) {
-                strlcpy(res.error,
-                        cmd.action == SET_FETCH_KEYS ? "当前后端不支持接口密钥查询"
-                                                     : "后端尚未配置记忆整理目录",
-                        sizeof(res.error));
-            } else if (!res.error[0]) {
-                strlcpy(res.error, "无法读取后端配置，请重试", sizeof(res.error));
-            }
-            terminal_network_release();
         }
         xQueueSend(results, &res, portMAX_DELAY);
     }
@@ -217,30 +189,24 @@ static lv_obj_t *make_info_row(lv_obj_t *parent, const char *key, const char *va
     lv_obj_set_style_pad_column(row, 14, LV_PART_MAIN);
 
     eink_label(row, key, eink_body_font(), LV_TEXT_ALIGN_LEFT);
-    lv_obj_t *v = eink_label(row, val ? val : "", eink_small_font(), LV_TEXT_ALIGN_RIGHT);
-    lv_obj_set_flex_grow(v, 1);
-    lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_WRAP);
-    if (val_out) *val_out = v;
+    if (val || val_out) {
+        lv_obj_t *v = eink_label(row, val ? val : "", eink_small_font(), LV_TEXT_ALIGN_RIGHT);
+        lv_obj_set_flex_grow(v, 1);
+        lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_WRAP);
+        if (val_out) *val_out = v;
+    }
     return row;
 }
 
-static lv_obj_t *make_note_card(lv_obj_t *parent, const char *title, const char *body_text)
+static lv_obj_t *make_collection_note(lv_obj_t *parent, const char *text)
 {
-    lv_obj_t *card = make_settings_card(parent);
-    lv_obj_set_style_pad_all(card, 22, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(card, 8, LV_PART_MAIN);
-
-    if (title && *title) {
-        lv_obj_t *t = eink_label(card, title, eink_body_font(), LV_TEXT_ALIGN_LEFT);
-        lv_obj_set_width(t, LV_PCT(100));
-    }
-    if (body_text && *body_text) {
-        lv_obj_t *b = eink_label(card, body_text, eink_small_font(), LV_TEXT_ALIGN_LEFT);
-        lv_obj_set_width(b, LV_PCT(100));
-        lv_label_set_long_mode(b, LV_LABEL_LONG_MODE_WRAP);
-        lv_obj_set_style_text_line_space(b, 6, LV_PART_MAIN);
-    }
-    return card;
+    lv_obj_t *label = eink_label(parent, text, eink_small_font(), LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_width(label, LV_PCT(100));
+    lv_obj_set_style_pad_hor(label, 22, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(label, 12, LV_PART_MAIN);
+    lv_obj_set_style_text_line_space(label, 4, LV_PART_MAIN);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_WRAP);
+    return label;
 }
 
 static lv_obj_t *make_category_row(lv_obj_t *parent, const char *title, const char *right_text,
@@ -300,120 +266,6 @@ static void trigger_full_refresh(lv_event_t *event)
     lvgl_port_request_full_refresh();
 }
 
-static void refresh_keys_clicked(lv_event_t *event)
-{
-    (void)event;
-    if (!keys_body) return;
-    lv_obj_clean(keys_body);
-    bool started = queue_setting((set_cmd_t){.action = SET_FETCH_KEYS});
-    make_note_card(keys_body, NULL, started ? "正在读取接口密钥状态…" : "当前无法读取，请稍后刷新。");
-}
-
-static void refresh_memory_clicked(lv_event_t *event)
-{
-    (void)event;
-    if (!memory_body) return;
-    lv_obj_clean(memory_body);
-    bool started = queue_setting((set_cmd_t){.action = SET_FETCH_MEMORY});
-    make_note_card(memory_body, NULL, started ? "正在读取记忆整理计划…" : "当前无法读取，请稍后刷新。");
-}
-
-static void render_keys_result(const set_res_t *res)
-{
-    if (!keys_body) return;
-    lv_obj_clean(keys_body);
-    if (!res->ok || !res->json) {
-        make_note_card(keys_body, "无法读取密钥", res->error);
-        return;
-    }
-    const cJSON *items = cJSON_GetObjectItemCaseSensitive(res->json, "items");
-    if (!cJSON_IsArray(items) || cJSON_GetArraySize(items) == 0) {
-        make_note_card(keys_body, "暂无接口密钥", "后端没有可管理的接口密钥。");
-        return;
-    }
-
-    lv_obj_t *group = make_settings_card(keys_body);
-
-    int count = cJSON_GetArraySize(items);
-    for (int i = 0; i < count; ++i) {
-        const cJSON *item = cJSON_GetArrayItem(items, i);
-        const cJSON *usages = cJSON_GetObjectItemCaseSensitive(item, "usages");
-        const char *id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "id"));
-        bool configured = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item, "configured"));
-        const char *masked = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "masked"));
-
-        char title[96] = {0};
-        if (cJSON_IsArray(usages) && cJSON_GetArraySize(usages) > 0) {
-            int n = cJSON_GetArraySize(usages);
-            for (int j = 0; j < n; ++j) {
-                const char *u = cJSON_GetStringValue(cJSON_GetArrayItem(usages, j));
-                if (!u) continue;
-                if (title[0]) strlcat(title, "、", sizeof(title));
-                strlcat(title, u, sizeof(title));
-            }
-        }
-        if (!title[0]) strlcpy(title, id ? id : "密钥", sizeof(title));
-
-        char val[48];
-        if (configured && masked && *masked) {
-            snprintf(val, sizeof(val), "已配置 %s", masked);
-        } else if (configured) {
-            strlcpy(val, "已配置", sizeof(val));
-        } else {
-            strlcpy(val, "未配置", sizeof(val));
-        }
-
-        make_info_row(group, title, val, NULL);
-        if (i + 1 < count) add_inset_divider(group);
-    }
-
-    make_note_card(keys_body, NULL, "已保存的密钥仅显示掩码；如需更换请在手机端或桌面端操作。");
-}
-
-static void render_memory_result(const set_res_t *res)
-{
-    if (!memory_body) return;
-    lv_obj_clean(memory_body);
-    if (!res->ok || !res->json) {
-        make_note_card(memory_body, "无法读取整理计划", res->error);
-        return;
-    }
-    const cJSON *days = cJSON_GetObjectItemCaseSensitive(res->json, "interval_days");
-    const char *local_time =
-        cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(res->json, "local_time"));
-    const char *tz = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(res->json, "timezone"));
-    const char *next_at =
-        cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(res->json, "next_run_at"));
-
-    char days_buf[32] = "-";
-    if (cJSON_IsNumber(days)) snprintf(days_buf, sizeof(days_buf), "%d 天", days->valueint);
-
-    char time_buf[64] = "-";
-    if (local_time && tz)
-        snprintf(time_buf, sizeof(time_buf), "%s (%s)", local_time, tz);
-    else if (local_time)
-        strlcpy(time_buf, local_time, sizeof(time_buf));
-
-    char next_buf[32] = "-";
-    if (next_at && *next_at) {
-        snprintf(next_buf, sizeof(next_buf), "%.16s", next_at);
-        for (char *p = next_buf; *p; ++p) {
-            if (*p == 'T') *p = ' ';
-        }
-    }
-
-    lv_obj_t *group = make_settings_card(memory_body);
-
-    make_info_row(group, "间隔天数", days_buf, NULL);
-    add_inset_divider(group);
-    make_info_row(group, "运行时间", time_buf, NULL);
-    add_inset_divider(group);
-    make_info_row(group, "下次整理", next_buf, NULL);
-
-    make_note_card(memory_body, NULL,
-                   "同一账号的所有设备共用此记忆整理计划，可在手机端或桌面端修改。");
-}
-
 static void set_capacity(lv_obj_t *label, uint64_t bytes)
 {
     static const char *const units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
@@ -458,18 +310,18 @@ static void refresh_network_state(void)
         [TERMINAL_NETWORK_OFF] = "已关闭",
     };
     terminal_network_mode_t mode = terminal_network_mode();
-    if (idx_conn_val && strcmp(lv_label_get_text(idx_conn_val), mode_names[mode])) {
-        lv_label_set_text(idx_conn_val, mode_names[mode]);
+    if (idx_network_val && strcmp(lv_label_get_text(idx_network_val), mode_names[mode])) {
+        lv_label_set_text(idx_network_val, mode_names[mode]);
     }
-    if (!conn_status_val) return;
+    if (!network_status_val) return;
 
     char ssid[TERMINAL_WIFI_SSID_SIZE];
     bool configured = terminal_wifi_saved_ssid(ssid);
     char name[TERMINAL_WIFI_SSID_SIZE];
     if (configured) ssid_label(name, ssid);
     const char *saved_name = configured ? name : "未配置";
-    if (strcmp(lv_label_get_text(conn_wifi_val), saved_name)) {
-        lv_label_set_text(conn_wifi_val, saved_name);
+    if (strcmp(lv_label_get_text(wifi_name_val), saved_name)) {
+        lv_label_set_text(wifi_name_val, saved_name);
     }
     const char *status;
     if (network_pending) status = "正在应用…";
@@ -488,8 +340,8 @@ static void refresh_network_state(void)
             break;
         }
     }
-    if (strcmp(lv_label_get_text(conn_status_val), status)) {
-        lv_label_set_text(conn_status_val, status);
+    if (strcmp(lv_label_get_text(network_status_val), status)) {
+        lv_label_set_text(network_status_val, status);
     }
     for (unsigned i = 0; i < sizeof(network_options) / sizeof(network_options[0]); ++i) {
         lv_obj_t *btn = network_options[i];
@@ -516,11 +368,7 @@ static void poll_results(lv_timer_t *timer)
             render_wifi_join(&res);
         } else if (res.action == SET_READ_STORAGE) {
             render_storage_result(&res);
-        } else if (res.action == SET_FETCH_KEYS)
-            render_keys_result(&res);
-        else
-            render_memory_result(&res);
-        cJSON_Delete(res.json);
+        }
     }
     refresh_network_state();
 }
@@ -582,7 +430,7 @@ static void back_to_network(lv_event_t *event)
 {
     (void)event;
     refresh_network_state();
-    lv_screen_load(conn_scr);
+    lv_screen_load(network_scr);
 }
 
 static void back_to_wifi_scan(lv_event_t *event)
@@ -817,13 +665,33 @@ static void select_network_mode(lv_event_t *event)
     }
 }
 
-static void open_conn_page(lv_event_t *event)
+static void open_connection_page(lv_event_t *event)
+{
+    (void)event;
+    if (!connection_scr) {
+        lv_obj_t *body = NULL;
+        connection_scr = create_subpage_shell("连接", &body, back_to_index, NULL);
+        lv_obj_t *group = make_settings_card(body);
+        const char *device_id = wintermute_device_id();
+
+        make_info_row(group, "设备名称", WINTERMUTE_DEVICE_NAME, NULL);
+        add_inset_divider(group);
+        make_info_row(group, "设备平台", "ESP32-S3", NULL);
+        add_inset_divider(group);
+        make_info_row(group, "设备 ID", device_id[0] ? device_id : "未生成", NULL);
+        add_inset_divider(group);
+        make_info_row(group, "服务地址", WINTERMUTE_SERVER_URL[0] ? WINTERMUTE_SERVER_URL : "未配置", NULL);
+    }
+    lv_screen_load(connection_scr);
+}
+
+static void open_network_page(lv_event_t *event)
 {
     (void)event;
     ensure_worker();
-    if (!conn_scr) {
+    if (!network_scr) {
         lv_obj_t *body = NULL;
-        conn_scr = create_subpage_shell("网络", &body, back_to_index, NULL);
+        network_scr = create_subpage_shell("网络", &body, back_to_index, NULL);
 
         lv_obj_t *modes = lv_obj_create(body);
         eink_style_clean_box(modes);
@@ -851,22 +719,16 @@ static void open_conn_page(lv_event_t *event)
 
         lv_obj_t *group = make_settings_card(body);
 
-        make_info_row(group, "连接状态", "", &conn_status_val);
+        make_info_row(group, "网络状态", "", &network_status_val);
         add_inset_divider(group);
-        make_info_row(group, "Wi-Fi 名称", "", &conn_wifi_val);
-        add_inset_divider(group);
-        make_info_row(group, "设备名称", "", &conn_device_val);
-        add_inset_divider(group);
-        make_info_row(group, "设备 ID", "", &conn_id_val);
-        add_inset_divider(group);
-        make_info_row(group, "服务地址", "", &conn_url_val);
+        make_info_row(group, "Wi-Fi 名称", "", &wifi_name_val);
 
         wifi_scan_button = eink_outline_button(body, "扫描 Wi-Fi", eink_body_font(), 48,
                                                open_wifi_scan, NULL);
         lv_obj_set_width(wifi_scan_button, LV_PCT(100));
     }
-    settings_screen_refresh_state();
-    lv_screen_load(conn_scr);
+    refresh_network_state();
+    lv_screen_load(network_scr);
 }
 
 static void open_device_app(lv_event_t *event)
@@ -886,28 +748,6 @@ static void open_connectors_page(lv_event_t *event)
         }
     }
     lv_screen_load(connectors_scr);
-}
-
-static void open_keys_page(lv_event_t *event)
-{
-    (void)event;
-    ensure_worker();
-    if (!keys_scr) {
-        keys_scr = create_subpage_shell("接口密钥", &keys_body, back_to_index, refresh_keys_clicked);
-    }
-    lv_screen_load(keys_scr);
-    refresh_keys_clicked(NULL);
-}
-
-static void open_memory_page(lv_event_t *event)
-{
-    (void)event;
-    ensure_worker();
-    if (!memory_scr) {
-        memory_scr = create_subpage_shell("记忆整理", &memory_body, back_to_index, refresh_memory_clicked);
-    }
-    lv_screen_load(memory_scr);
-    refresh_memory_clicked(NULL);
 }
 
 static void open_appearance_page(lv_event_t *event)
@@ -932,23 +772,103 @@ static void open_appearance_page(lv_event_t *event)
     lv_screen_load(appearance_scr);
 }
 
+static void load_collection_preferences(void)
+{
+    nvs_handle_t prefs;
+    if (nvs_open(COLLECTION_PREFS_NAMESPACE, NVS_READONLY, &prefs) != ESP_OK) return;
+    uint8_t enabled;
+    if (nvs_get_u8(prefs, recording_upload_key, &enabled) == ESP_OK) {
+        recording_auto_upload = enabled == 1;
+    }
+    if (nvs_get_u8(prefs, READING_PROGRESS_PREF, &enabled) == ESP_OK) {
+        reading_progress_upload = enabled == 1;
+    }
+    nvs_close(prefs);
+}
+
+static bool save_collection_preference(const char *key, bool enabled)
+{
+    nvs_handle_t prefs;
+    if (nvs_open(COLLECTION_PREFS_NAMESPACE, NVS_READWRITE, &prefs) != ESP_OK) return false;
+    esp_err_t error = nvs_set_u8(prefs, key, enabled);
+    if (error == ESP_OK) error = nvs_commit(prefs);
+    nvs_close(prefs);
+    return error == ESP_OK;
+}
+
+static void refresh_recording_upload_mode(void)
+{
+    lv_obj_set_state(recording_manual_button, LV_STATE_CHECKED, !recording_auto_upload);
+    lv_obj_set_state(recording_auto_button, LV_STATE_CHECKED, recording_auto_upload);
+}
+
+static void select_recording_upload(lv_event_t *event)
+{
+    bool automatic = (uintptr_t)lv_event_get_user_data(event) != 0;
+    if (automatic != recording_auto_upload && !save_collection_preference(recording_upload_key, automatic)) {
+        lv_label_set_text(recording_upload_note, "录音上传设置保存失败，请重试。");
+        return;
+    }
+    recording_auto_upload = automatic;
+    refresh_recording_upload_mode();
+    lv_label_set_text(recording_upload_note, recording_upload_hint);
+}
+
+static void toggle_reading_upload(lv_event_t *event)
+{
+    lv_obj_t *toggle = lv_event_get_target_obj(event);
+    bool enabled = lv_obj_has_state(toggle, LV_STATE_CHECKED);
+    if (enabled == reading_progress_upload) return;
+    if (!save_collection_preference(READING_PROGRESS_PREF, enabled)) {
+        lv_obj_set_state(toggle, LV_STATE_CHECKED, reading_progress_upload);
+        lv_label_set_text(reading_upload_note, "阅读进度设置保存失败，请重试。");
+        return;
+    }
+    reading_progress_upload = enabled;
+    if (enabled) reading_progress_wake();
+    lv_label_set_text(reading_upload_note, reading_upload_hint);
+}
+
 static void open_collection_page(lv_event_t *event)
 {
     (void)event;
     if (!collection_scr) {
+        load_collection_preferences();
         lv_obj_t *body = NULL;
         collection_scr = create_subpage_shell("信息采集", &body, back_to_index, NULL);
 
-        lv_obj_t *group = make_settings_card(body);
+        eink_label(body, "录音采集", eink_body_font(), LV_TEXT_ALIGN_LEFT);
+        lv_obj_t *recording = make_settings_card(body);
+        lv_obj_t *upload = make_info_row(recording, "录音上传", NULL, NULL);
+        lv_obj_t *choices = lv_obj_create(upload);
+        eink_style_clean_box(choices);
+        lv_obj_remove_flag(choices, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(choices, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(choices, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_column(choices, 8, LV_PART_MAIN);
+        recording_manual_button = eink_pill_button(choices, "手动上传", eink_small_font(), 44,
+                                                    false, select_recording_upload, NULL);
+        recording_auto_button = eink_pill_button(choices, "自动上传", eink_small_font(), 44,
+                                                  false, select_recording_upload, (void *)(uintptr_t)1);
+        refresh_recording_upload_mode();
+        recording_upload_note = make_collection_note(recording, recording_upload_hint);
 
-        make_info_row(group, "录音状态", "就绪", &rec_status_val);
-        add_inset_divider(group);
-        make_info_row(group, "状态同步", "后台自动上报", NULL);
-        add_inset_divider(group);
-        make_info_row(group, "本地缓存", "SD 卡分段存储", NULL);
+        add_inset_divider(recording);
+        make_info_row(recording, "录音状态", "就绪", &rec_status_val);
+        add_inset_divider(recording);
+        make_info_row(recording, "状态同步", "后台自动上报", NULL);
+        add_inset_divider(recording);
+        make_info_row(recording, "本地缓存", "SD 卡分段存储", NULL);
 
-        make_note_card(body, "按键采集说明",
-                       "长按 BOOT 键开始或停止录音。\n录音过程中短按 BOOT 键可选择时长并上传音频。");
+        eink_label(body, "阅读采集", eink_body_font(), LV_TEXT_ALIGN_LEFT);
+        lv_obj_t *reading = make_settings_card(body);
+        lv_obj_t *progress = make_info_row(reading, "阅读进度上传", NULL, NULL);
+        lv_obj_t *toggle = lv_switch_create(progress);
+        lv_obj_set_size(toggle, 68, 36);
+        lv_obj_set_style_anim_duration(toggle, 0, LV_PART_MAIN);
+        lv_obj_set_state(toggle, LV_STATE_CHECKED, reading_progress_upload);
+        lv_obj_add_event_cb(toggle, toggle_reading_upload, LV_EVENT_VALUE_CHANGED, NULL);
+        reading_upload_note = make_collection_note(reading, reading_upload_hint);
     }
     settings_screen_refresh_state();
     lv_screen_load(collection_scr);
@@ -1008,13 +928,11 @@ static void create_index_screen(void)
     // Keep the pressed row's outline clear of the surrounding card border.
     lv_obj_set_style_pad_all(group, 6, LV_PART_MAIN);
 
-    make_category_row(group, "网络", "", &idx_conn_val, open_conn_page);
+    make_category_row(group, "连接", "", NULL, open_connection_page);
+    add_inset_divider(group);
+    make_category_row(group, "网络", "", &idx_network_val, open_network_page);
     add_inset_divider(group);
     make_category_row(group, "连接器", "5 项应用", NULL, open_connectors_page);
-    add_inset_divider(group);
-    make_category_row(group, "接口密钥", "查看", NULL, open_keys_page);
-    add_inset_divider(group);
-    make_category_row(group, "记忆整理", "计划", NULL, open_memory_page);
     add_inset_divider(group);
     make_category_row(group, "外观", "墨水屏", NULL, open_appearance_page);
     add_inset_divider(group);
@@ -1029,12 +947,6 @@ void settings_screen_refresh_state(void)
 
     refresh_network_state();
     if (idx_rec_val) lv_label_set_text(idx_rec_val, rec);
-    if (conn_device_val) lv_label_set_text(conn_device_val, WINTERMUTE_DEVICE_NAME);
-    if (conn_id_val) lv_label_set_text(conn_id_val, wintermute_device_id());
-    if (conn_url_val) {
-        lv_label_set_text(conn_url_val,
-                          WINTERMUTE_SERVER_URL[0] ? WINTERMUTE_SERVER_URL : "未配置");
-    }
     if (rec_status_val) lv_label_set_text(rec_status_val, rec);
 }
 
@@ -1051,10 +963,9 @@ void settings_screen_hide(void)
     lv_obj_t *active = lv_screen_active();
     if (wifi_password && active == wifi_password_scr) lv_textarea_set_text(wifi_password, "");
     if (home_ref &&
-        (active == index_scr || active == conn_scr || active == wifi_scan_scr ||
+        (active == index_scr || active == connection_scr || active == network_scr || active == wifi_scan_scr ||
          active == wifi_password_scr || active == connectors_scr ||
-         active == keys_scr || active == memory_scr || active == appearance_scr ||
-         active == collection_scr || active == storage_scr)) {
+         active == appearance_scr || active == collection_scr || active == storage_scr)) {
         lv_screen_load(home_ref);
     }
 }

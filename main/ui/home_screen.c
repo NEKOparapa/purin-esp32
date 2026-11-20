@@ -1,10 +1,11 @@
 #include "home_screen.h"
 #include "home_response.h"
 #include "home_graphics.h"
-#include "device_apps_screen.h"
+#include "device_apps.h"
 #include <stdio.h>
 #include "agent_screen.h"
 #include "eink_ui.h"
+#include "reader_screen.h"
 #include "settings_screen.h"
 
 #include <string.h>
@@ -188,7 +189,7 @@ static void open_schedule(lv_event_t *event)
 static void open_reading(lv_event_t *event)
 {
     (void)event;
-    device_app_open(APP_LIBRARY, home_scr);
+    reader_open(home_scr, NULL);
 }
 
 static void refresh_desk(lv_timer_t *timer)

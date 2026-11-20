@@ -21,6 +21,7 @@
 #ifndef WINTERMUTE_DEVICE_NAME
 #define WINTERMUTE_DEVICE_NAME "ESP32"
 #endif
+#define WINTERMUTE_DEVICE_PLATFORM "esp32"
 
 const char *wintermute_device_id(void);
 const char *wintermute_device_instance_id(void);

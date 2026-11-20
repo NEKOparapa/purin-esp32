@@ -6,6 +6,7 @@
 #include "recording_button.h"
 #include "audio_upload.h"
 #include "agent_client.h"
+#include "reading_progress.h"
 #include "terminal_network.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -42,6 +43,7 @@ static void ui_task(void *arg)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Upload initialization failed: %s", esp_err_to_name(err));
     }
+    reading_progress_wake();
     recording_button_t boot = {0};
     recorder_state_t last_reported = RECORDER_IDLE;
     static const char *const state_names[] = {"idle", "starting", "recording", "saving", "error"};
