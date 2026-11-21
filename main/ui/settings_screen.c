@@ -3,10 +3,12 @@
 #include "device_apps_screen.h"
 #include "eink_ui.h"
 #include "esp_flash.h"
+#include "esp_system.h"
 #include "lvgl_port.h"
 #include "reading_progress.h"
 #include "recorder.h"
 #include "terminal_network.h"
+#include "terminal_pairing.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -20,14 +22,20 @@
 
 enum { WIFI_SCAN_LIMIT = 16 };
 typedef enum {
-    SET_NETWORK_MODE, SET_WIFI_SCAN, SET_WIFI_JOIN, SET_READ_STORAGE
+    SET_NETWORK_MODE, SET_WIFI_SCAN, SET_WIFI_JOIN, SET_READ_STORAGE, SET_PAIR_DEVICE
 } set_action_t;
+
+typedef struct {
+    char address[TERMINAL_SERVER_SIZE];
+    char code[11];
+} pair_fields_t;
 
 typedef struct {
     set_action_t action;
     terminal_network_mode_t mode;
     terminal_wifi_ap_t ap;
     char *password;
+    pair_fields_t *pair;
 } set_cmd_t;
 
 typedef struct {
@@ -46,6 +54,12 @@ typedef struct {
 static lv_obj_t *home_ref;
 static lv_obj_t *index_scr;
 static lv_obj_t *connection_scr;
+static lv_obj_t *pair_scr;
+static lv_obj_t *pair_address;
+static lv_obj_t *pair_code;
+static lv_obj_t *pair_keyboard;
+static lv_obj_t *pair_button;
+static lv_obj_t *pair_status;
 static lv_obj_t *network_scr;
 static lv_obj_t *wifi_scan_scr;
 static lv_obj_t *wifi_password_scr;
@@ -138,6 +152,10 @@ static void settings_worker(void *unused)
         } else if (cmd.action == SET_READ_STORAGE) {
             res.ok = esp_flash_get_physical_size(NULL, &res.flash_bytes) == ESP_OK;
             res.sd_error = board_sdcard_read_usage(&res.sd_total_bytes, &res.sd_free_bytes);
+        } else if (cmd.action == SET_PAIR_DEVICE) {
+            res.ok = terminal_pair_device(cmd.pair->address, cmd.pair->code, res.error, sizeof(res.error));
+            mbedtls_platform_zeroize(cmd.pair, sizeof(*cmd.pair));
+            free(cmd.pair);
         }
         xQueueSend(results, &res, portMAX_DELAY);
     }
@@ -353,6 +371,19 @@ static void refresh_network_state(void)
     else lv_obj_remove_state(wifi_scan_button, LV_STATE_DISABLED);
 }
 
+static bool can_restart(void)
+{
+    recorder_state_t state = recorder_get_status().state;
+    return state == RECORDER_IDLE || state == RECORDER_ERROR;
+}
+
+static void restart_after_pairing(lv_timer_t *timer)
+{
+    (void)timer;
+    if (can_restart()) esp_restart();
+    lv_label_set_text(pair_status, "已保存，录音结束后自动重启。");
+}
+
 static void poll_results(lv_timer_t *timer)
 {
     (void)timer;
@@ -368,6 +399,14 @@ static void poll_results(lv_timer_t *timer)
             render_wifi_join(&res);
         } else if (res.action == SET_READ_STORAGE) {
             render_storage_result(&res);
+        } else if (res.action == SET_PAIR_DEVICE) {
+            lv_label_set_text(pair_status, res.ok ? "已配对，正在重启连接…" : res.error);
+            if (res.ok) {
+                lv_textarea_set_text(pair_code, "");
+                lv_timer_create(restart_after_pairing, 1000, NULL);
+            } else {
+                lv_obj_remove_state(pair_button, LV_STATE_DISABLED);
+            }
         }
     }
     refresh_network_state();
@@ -665,6 +704,81 @@ static void select_network_mode(lv_event_t *event)
     }
 }
 
+static void focus_pair_field(lv_event_t *event)
+{
+    lv_obj_t *field = lv_event_get_target_obj(event);
+    lv_keyboard_set_mode(pair_keyboard, field == pair_code ? LV_KEYBOARD_MODE_NUMBER
+                                                          : LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_keyboard_set_textarea(pair_keyboard, field);
+}
+
+static void pair_device_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (busy || lv_obj_has_state(pair_button, LV_STATE_DISABLED)) return;
+    if (!can_restart()) {
+        lv_label_set_text(pair_status, "请先结束录音再配对。");
+        return;
+    }
+    pair_fields_t *fields = calloc(1, sizeof(*fields));
+    if (fields) {
+        strlcpy(fields->address, lv_textarea_get_text(pair_address), sizeof(fields->address));
+        strlcpy(fields->code, lv_textarea_get_text(pair_code), sizeof(fields->code));
+        if (queue_setting((set_cmd_t){.action = SET_PAIR_DEVICE, .pair = fields})) {
+            lv_obj_add_state(pair_button, LV_STATE_DISABLED);
+            lv_label_set_text(pair_status, "正在配对…");
+            return;
+        }
+        mbedtls_platform_zeroize(fields, sizeof(*fields));
+        free(fields);
+    }
+    lv_label_set_text(pair_status, "无法开始配对，请重试。");
+}
+
+static void back_to_connection(lv_event_t *event)
+{
+    (void)event;
+    lv_screen_load(connection_scr);
+}
+
+static void open_pair_page(lv_event_t *event)
+{
+    (void)event;
+    ensure_worker();
+    if (!pair_scr) {
+        lv_obj_t *body = NULL;
+        pair_scr = create_subpage_shell("配对设备", &body, back_to_connection, NULL);
+        const char *server = terminal_server_url();
+
+        lv_obj_t *frame = eink_textarea(body, eink_body_font(), 50, EINK_RADIUS_CONTROL, &pair_address);
+        lv_obj_set_width(frame, LV_PCT(100));
+        lv_textarea_set_placeholder_text(pair_address, "HTTPS 服务域名");
+        lv_textarea_set_max_length(pair_address, TERMINAL_SERVER_SIZE - 1);
+        lv_textarea_set_text(pair_address, !strncmp(server, "https://", 8) ? server + 8 : server);
+        lv_obj_add_event_cb(pair_address, focus_pair_field, LV_EVENT_CLICKED, NULL);
+
+        frame = eink_textarea(body, eink_body_font(), 50, EINK_RADIUS_CONTROL, &pair_code);
+        lv_obj_set_width(frame, LV_PCT(100));
+        lv_textarea_set_placeholder_text(pair_code, "输入 10 位配对码");
+        lv_textarea_set_accepted_chars(pair_code, "0123456789");
+        lv_textarea_set_max_length(pair_code, 10);
+        lv_obj_add_event_cb(pair_code, focus_pair_field, LV_EVENT_CLICKED, NULL);
+
+        pair_button = eink_outline_button(body, "配对并连接", eink_body_font(), 48, pair_device_clicked, NULL);
+        lv_obj_set_width(pair_button, LV_PCT(100));
+        pair_status = eink_label(body, "在管理面板生成一次性配对码。", eink_small_font(), LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_width(pair_status, LV_PCT(100));
+        pair_keyboard = lv_keyboard_create(pair_scr);
+        eink_style_keyboard(pair_keyboard);
+        lv_obj_set_size(pair_keyboard, LV_PCT(100), 218);
+        lv_keyboard_set_mode(pair_keyboard, LV_KEYBOARD_MODE_NUMBER);
+        lv_keyboard_set_textarea(pair_keyboard, pair_code);
+        lv_obj_add_event_cb(pair_keyboard, pair_device_clicked, LV_EVENT_READY, NULL);
+        lv_obj_add_event_cb(pair_keyboard, back_to_connection, LV_EVENT_CANCEL, NULL);
+    }
+    lv_screen_load(pair_scr);
+}
+
 static void open_connection_page(lv_event_t *event)
 {
     (void)event;
@@ -673,14 +787,16 @@ static void open_connection_page(lv_event_t *event)
         connection_scr = create_subpage_shell("连接", &body, back_to_index, NULL);
         lv_obj_t *group = make_settings_card(body);
         const char *device_id = wintermute_device_id();
-
+        const char *server = terminal_server_url();
         make_info_row(group, "设备名称", WINTERMUTE_DEVICE_NAME, NULL);
         add_inset_divider(group);
         make_info_row(group, "设备平台", "ESP32-S3", NULL);
         add_inset_divider(group);
         make_info_row(group, "设备 ID", device_id[0] ? device_id : "未生成", NULL);
         add_inset_divider(group);
-        make_info_row(group, "服务地址", WINTERMUTE_SERVER_URL[0] ? WINTERMUTE_SERVER_URL : "未配置", NULL);
+        make_info_row(group, "服务地址", server[0] ? server : "未配置", NULL);
+        lv_obj_t *button = eink_outline_button(body, "配对设备", eink_body_font(), 48, open_pair_page, NULL);
+        lv_obj_set_width(button, LV_PCT(100));
     }
     lv_screen_load(connection_scr);
 }
@@ -963,7 +1079,8 @@ void settings_screen_hide(void)
     lv_obj_t *active = lv_screen_active();
     if (wifi_password && active == wifi_password_scr) lv_textarea_set_text(wifi_password, "");
     if (home_ref &&
-        (active == index_scr || active == connection_scr || active == network_scr || active == wifi_scan_scr ||
+        (active == index_scr || active == connection_scr || active == pair_scr ||
+         active == network_scr || active == wifi_scan_scr ||
          active == wifi_password_scr || active == connectors_scr ||
          active == appearance_scr || active == collection_scr || active == storage_scr)) {
         lv_screen_load(home_ref);

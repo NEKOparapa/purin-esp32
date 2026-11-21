@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include "terminal_http.h"
 #include "terminal_network.h"
+#include "terminal_pairing.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -39,7 +40,7 @@ static bool withdrew;
 bool terminal_tools_enabled(void)
 {
     return terminal_configured() &&
-           strncmp(WINTERMUTE_SERVER_URL, "https://", 8) == 0;
+           strncmp(terminal_server_url(), "https://", 8) == 0;
 }
 
 static cJSON *post(const char *path, const cJSON *body, int *code)
@@ -155,9 +156,9 @@ void terminal_tools_poll(nvs_handle_t journal)
 {
     // Never send a cached result/token after the board has been reprovisioned.
     char identity[sizeof(WINTERMUTE_SERVER_URL) + sizeof(WINTERMUTE_DEVICE_TOKEN) +
-                  sizeof(WINTERMUTE_DEVICE_ID) + 19];
-    int length = snprintf(identity, sizeof(identity), "%s%c%s%c%s", WINTERMUTE_SERVER_URL, 0,
-                          wintermute_device_id(), 0, WINTERMUTE_DEVICE_TOKEN);
+                  sizeof(WINTERMUTE_DEVICE_ID) + TERMINAL_SERVER_SIZE + TERMINAL_TOKEN_SIZE + 31];
+    int length = snprintf(identity, sizeof(identity), "%s%c%s%c%s", terminal_server_url(), 0,
+                          wintermute_device_id(), 0, terminal_device_token());
     uint8_t binding[32];
     if (length < 0 || (size_t)length >= sizeof(identity) ||
         mbedtls_sha256((const uint8_t *)identity, (size_t)length + 1, binding, 0) != 0) return;

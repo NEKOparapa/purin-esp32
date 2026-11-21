@@ -6,12 +6,14 @@ idf_component_register(SRCS "app_main.c" "ui/eink_ui.c" "ui/home_screen.c" "ui/a
                             "ui/question_card.c" "ui/settings_screen.c" "ui/home_response.c" "ui/home_graphics.c"
                             "ui/fonts/home_controls.c"
                             "agent/terminal_network.c" "agent/terminal_http.c" "agent/terminal_tools.c"
+                            "agent/terminal_pairing.c"
                             "agent/agent_client.c" "apps/device_apps.c" "apps/library.c"
                             "apps/reading_progress.c"
                             "apps/player.c" "ui/device_apps_screen.c" "ui/reader_screen.c" "ui/reader_layout.c"
                             "recording/recorder.c" "upload/audio_upload.c"
                        PRIV_REQUIRES board lvgl_port audio_capture recording_storage esp_timer
                                      esp_http_client esp_wifi esp_netif nvs_flash mbedtls esp_event json spi_flash
+                                     bootloader_support
                        PRIV_INCLUDE_DIRS "ui" "recording" "upload" "agent" "apps" "../config"
                        EMBED_FILES "ui/fonts/chat_sc.ttf")
 

@@ -1,5 +1,6 @@
 #include "agent_client.h"
 #include "terminal_network.h"
+#include "terminal_pairing.h"
 #include "terminal_tools.h"
 
 #include <inttypes.h>
@@ -339,7 +340,12 @@ static void worker(void *arg)
 esp_err_t agent_client_init(void)
 {
     esp_err_t error = nvs_flash_init();
-    if (error == ESP_OK) error = nvs_open("wm_chat", NVS_READWRITE, &journal);
+    char journal_name[16] = "wm_chat";
+    if (terminal_is_paired()) {
+        // A newly paired backend must never receive the previous connection's queued messages.
+        snprintf(journal_name, sizeof(journal_name), "wm_%.12s", wintermute_device_id() + 6);
+    }
+    if (error == ESP_OK) error = nvs_open(journal_name, NVS_READWRITE, &journal);
     if (error != ESP_OK) return error;
     requests = xQueueCreate(1, sizeof(command_t));
     responses = xQueueCreate(1, sizeof(agent_result_t *));

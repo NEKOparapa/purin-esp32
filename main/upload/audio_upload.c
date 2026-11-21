@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 
 #include "terminal_network.h"
+#include "terminal_pairing.h"
 #include "terminal_http.h"
 
 static const char *TAG = "audio_upload";
@@ -87,7 +88,7 @@ static esp_err_t send_segment(const audio_upload_snapshot_t *snapshot, uint32_t 
         return ESP_FAIL;
     }
     char url[512];
-    length = snprintf(url, sizeof(url), "%s/v1/audio/slices", WINTERMUTE_SERVER_URL);
+    length = snprintf(url, sizeof(url), "%s/v1/audio/slices", terminal_server_url());
     if (length < 0 || (size_t)length >= sizeof(url)) {
         fclose(audio);
         return ESP_ERR_INVALID_SIZE;

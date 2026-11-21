@@ -70,4 +70,6 @@ esp_err_t terminal_wifi_scan(terminal_wifi_ap_t *aps, size_t capacity, size_t *c
 terminal_wifi_join_result_t terminal_wifi_join(const terminal_wifi_ap_t *ap, const char *password);
 // Each successful acquire must be paired with a release, on the same worker.
 esp_err_t terminal_network_acquire(void);
+// Pairing needs a link before normal backend authentication can run.
+esp_err_t terminal_network_acquire_link(void);
 void terminal_network_release(void);

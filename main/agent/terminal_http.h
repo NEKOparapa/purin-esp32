@@ -11,3 +11,4 @@ cJSON *terminal_http_json(char *status, size_t size, esp_http_client_method_t me
 cJSON *terminal_http_json_bounded(char *message, size_t size, esp_http_client_method_t method,
                                   const char *path, const cJSON *body, int expected,
                                   size_t limit, int *status_code);
+cJSON *terminal_http_redeem_pairing(const char *server, const cJSON *body, int *status_code);

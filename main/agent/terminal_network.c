@@ -1,5 +1,6 @@
 #include "terminal_network.h"
 #include "terminal_http.h"
+#include "terminal_pairing.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include "esp_mac.h"
@@ -57,15 +58,13 @@ static const char *const PREF_WIFI = "wifi";
 static void reconnect_wifi_on_boot(void *unused);
 
 const char *wintermute_device_instance_id(void) { return factory_id; }
-const char *wintermute_device_id(void) { return WINTERMUTE_DEVICE_ID[0] ? WINTERMUTE_DEVICE_ID : factory_id; }
 
 bool terminal_configured(void)
 {
     terminal_network_mode_t mode = terminal_network_mode();
     return mode != TERMINAL_NETWORK_OFF && (mode != TERMINAL_NETWORK_WIFI || terminal_wifi_saved_ssid(NULL)) &&
-           WINTERMUTE_SERVER_URL[0] && factory_id[0] &&
-           WINTERMUTE_DEVICE_TOKEN[0] &&
-           (!strncmp(WINTERMUTE_SERVER_URL, "https://", 8) || !strncmp(WINTERMUTE_SERVER_URL, "http://", 7));
+           terminal_device_token()[0] && factory_id[0] &&
+           (!strncmp(terminal_server_url(), "https://", 8) || !strncmp(terminal_server_url(), "http://", 7));
 }
 
 terminal_network_mode_t terminal_network_mode(void)
@@ -238,8 +237,9 @@ esp_err_t terminal_network_init(void)
     if (error != ESP_OK) return error;
     snprintf(factory_id, sizeof(factory_id), "esp32-%02x%02x%02x%02x%02x%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    ESP_LOGI("terminal", "Device: %s, device ID: %s", WINTERMUTE_DEVICE_NAME, wintermute_device_id());
     esp_err_t store_error = nvs_flash_init();
+    if (store_error == ESP_OK) terminal_load_pairing();
+    ESP_LOGI("terminal", "Device: %s, device ID: %s", WINTERMUTE_DEVICE_NAME, wintermute_device_id());
     nvs_handle_t prefs;
     if (store_error == ESP_OK) store_error = nvs_open(PREF_NAMESPACE, NVS_READONLY, &prefs);
     if (store_error == ESP_OK) {
@@ -509,13 +509,22 @@ esp_err_t terminal_network_select(terminal_network_mode_t mode)
     return error;
 }
 
-esp_err_t terminal_network_acquire(void)
+esp_err_t terminal_network_acquire_link(void)
 {
     if (!network_lock) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(network_lock, portMAX_DELAY);
-    esp_err_t error = terminal_configured() ? connect_selected() : ESP_ERR_INVALID_STATE;
+    esp_err_t error = connect_selected();
     if (error == ESP_OK) sync_calendar_clock();
-    if (error == ESP_OK && !profile_sent) {
+    else terminal_network_release();
+    return error;
+}
+
+esp_err_t terminal_network_acquire(void)
+{
+    if (!terminal_configured()) return ESP_ERR_INVALID_STATE;
+    esp_err_t error = terminal_network_acquire_link();
+    if (error != ESP_OK) return error;
+    if (!profile_sent) {
         char status[64];
         cJSON *reply = terminal_http_json(status, sizeof(status), HTTP_METHOD_POST,
                                           "/v1/devices/self", NULL, 200);

@@ -1,6 +1,7 @@
 #include "reading_progress.h"
 #include "terminal_http.h"
 #include "terminal_network.h"
+#include "terminal_pairing.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -49,7 +50,7 @@ static uint64_t hash_text(uint64_t hash, const char *text)
 
 static uint64_t upload_scope(void)
 {
-    return hash_text(hash_text(UINT64_C(14695981039346656037), WINTERMUTE_SERVER_URL),
+    return hash_text(hash_text(UINT64_C(14695981039346656037), terminal_server_url()),
                      wintermute_device_id());
 }
 

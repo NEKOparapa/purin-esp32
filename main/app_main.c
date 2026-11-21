@@ -8,6 +8,7 @@
 #include "agent_client.h"
 #include "reading_progress.h"
 #include "terminal_network.h"
+#include "terminal_pairing.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -84,6 +85,7 @@ static void ui_task(void *arg)
 
 void app_main(void)
 {
+    terminal_seed_pairing();
     esp_err_t err = board_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Board initialization failed: %s", esp_err_to_name(err));
