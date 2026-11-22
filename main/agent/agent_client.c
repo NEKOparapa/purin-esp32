@@ -100,8 +100,7 @@ static bool extract_replies(const cJSON *json, agent_result_t *result)
         const char *id = field(item, "output_id");
         const char *text = field(item, "text");
         const char *status = field(item, "status");
-        const char *layer = field(item, "layer");
-        if (!valid_id(id) || !text || !status || !layer) return false;
+        if (!valid_id(id) || !text || !status) return false;
         if (has_reply_id(result, id)) continue;
         agent_reply_t *reply = calloc(1, sizeof(*reply));
         if (!reply) return false;
@@ -110,7 +109,6 @@ static bool extract_replies(const cJSON *json, agent_result_t *result)
         if (!reply->text) return false;
         strlcpy(reply->id, id, sizeof(reply->id));
         reply->unread = strcmp(status, "pending") == 0;
-        reply->notification = !strcmp(layer, "notification");
         tail = &reply->next;
     }
     return true;

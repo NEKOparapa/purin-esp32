@@ -10,7 +10,6 @@ typedef struct agent_reply {
     char id[AGENT_ID_BYTES];
     char *text;
     bool unread;
-    bool notification;
     struct agent_reply *next;
 } agent_reply_t;
 

@@ -124,7 +124,7 @@ static void on_question_focus_input(lv_obj_t *ta)
     reader_layout(true);
 }
 
-static lv_obj_t *add_row(const char *id, const char *speaker, const char *text)
+static lv_obj_t *add_row(const char *id, bool is_user, const char *text)
 {
     for (size_t i = 0; i < row_count; ++i) {
         if (!strcmp(rows[i].id, id)) return rows[i].widget;
@@ -134,9 +134,6 @@ static lv_obj_t *add_row(const char *id, const char *speaker, const char *text)
         memmove(rows, rows + 1, sizeof(rows) - sizeof(rows[0]));
         --row_count;
     }
-
-    const bool is_user = strcmp(speaker, "You") == 0;
-    const bool is_notice = strcmp(speaker, "Notification") == 0;
 
     lv_obj_t *row = lv_obj_create(thread);
     eink_style_clean_box(row);
@@ -163,11 +160,6 @@ static lv_obj_t *add_row(const char *id, const char *speaker, const char *text)
     if (is_user) {
         lv_obj_set_style_bg_color(bubble, lv_color_black(), LV_PART_MAIN);
         lv_obj_set_style_border_width(bubble, 0, LV_PART_MAIN);
-    } else if (is_notice) {
-        lv_obj_set_style_bg_color(bubble, lv_color_white(), LV_PART_MAIN);
-        lv_obj_set_style_border_color(bubble, lv_color_black(), LV_PART_MAIN);
-        lv_obj_set_style_border_width(bubble, 1, LV_PART_MAIN);
-        eink_badge(bubble, "Notice", &lv_font_montserrat_20, false);
     } else {
         lv_obj_set_style_bg_color(bubble, lv_color_white(), LV_PART_MAIN);
         lv_obj_set_style_border_color(bubble, lv_color_black(), LV_PART_MAIN);
@@ -204,13 +196,13 @@ static void tick(lv_timer_t *timer)
             lv_textarea_set_text(draft, "");
         }
         if (result->message_id[0] && result->sent) {
-            lv_obj_scroll_to_view(add_row(result->message_id, "You", result->question), LV_ANIM_OFF);
+            lv_obj_scroll_to_view(add_row(result->message_id, true, result->question), LV_ANIM_OFF);
         } else if (result->message_id[0]) {
-            add_row(result->message_id, "You", result->question);
+            add_row(result->message_id, true, result->question);
         }
         for (agent_reply_t *r = result->replies; r; r = r->next) {
             if (!r->text) continue;
-            lv_obj_t *row = add_row(r->id, r->notification ? "Notification" : "Agent", r->text);
+            lv_obj_t *row = add_row(r->id, false, r->text);
             if (active_action == AGENT_SYNC || result->acknowledged) {
                 lv_obj_update_layout(thread);
                 // Start even a multi-page answer at its first line.
