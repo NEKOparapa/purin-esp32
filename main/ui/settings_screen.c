@@ -26,16 +26,11 @@ typedef enum {
 } set_action_t;
 
 typedef struct {
-    char address[TERMINAL_SERVER_SIZE];
-    char code[11];
-} pair_fields_t;
-
-typedef struct {
     set_action_t action;
     terminal_network_mode_t mode;
     terminal_wifi_ap_t ap;
     char *password;
-    pair_fields_t *pair;
+    char *pair_link;
 } set_cmd_t;
 
 typedef struct {
@@ -56,7 +51,6 @@ static lv_obj_t *index_scr;
 static lv_obj_t *connection_scr;
 static lv_obj_t *pair_scr;
 static lv_obj_t *pair_address;
-static lv_obj_t *pair_code;
 static lv_obj_t *pair_keyboard;
 static lv_obj_t *pair_button;
 static lv_obj_t *pair_status;
@@ -153,9 +147,9 @@ static void settings_worker(void *unused)
             res.ok = esp_flash_get_physical_size(NULL, &res.flash_bytes) == ESP_OK;
             res.sd_error = board_sdcard_read_usage(&res.sd_total_bytes, &res.sd_free_bytes);
         } else if (cmd.action == SET_PAIR_DEVICE) {
-            res.ok = terminal_pair_device(cmd.pair->address, cmd.pair->code, res.error, sizeof(res.error));
-            mbedtls_platform_zeroize(cmd.pair, sizeof(*cmd.pair));
-            free(cmd.pair);
+            res.ok = terminal_pair_device(cmd.pair_link, res.error, sizeof(res.error));
+            mbedtls_platform_zeroize(cmd.pair_link, strlen(cmd.pair_link));
+            free(cmd.pair_link);
         }
         xQueueSend(results, &res, portMAX_DELAY);
     }
@@ -402,7 +396,7 @@ static void poll_results(lv_timer_t *timer)
         } else if (res.action == SET_PAIR_DEVICE) {
             lv_label_set_text(pair_status, res.ok ? "已配对，正在重启连接…" : res.error);
             if (res.ok) {
-                lv_textarea_set_text(pair_code, "");
+                lv_textarea_set_text(pair_address, "");
                 lv_timer_create(restart_after_pairing, 1000, NULL);
             } else {
                 lv_obj_remove_state(pair_button, LV_STATE_DISABLED);
@@ -704,14 +698,6 @@ static void select_network_mode(lv_event_t *event)
     }
 }
 
-static void focus_pair_field(lv_event_t *event)
-{
-    lv_obj_t *field = lv_event_get_target_obj(event);
-    lv_keyboard_set_mode(pair_keyboard, field == pair_code ? LV_KEYBOARD_MODE_NUMBER
-                                                          : LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_keyboard_set_textarea(pair_keyboard, field);
-}
-
 static void pair_device_clicked(lv_event_t *event)
 {
     (void)event;
@@ -720,17 +706,15 @@ static void pair_device_clicked(lv_event_t *event)
         lv_label_set_text(pair_status, "请先结束录音再配对。");
         return;
     }
-    pair_fields_t *fields = calloc(1, sizeof(*fields));
-    if (fields) {
-        strlcpy(fields->address, lv_textarea_get_text(pair_address), sizeof(fields->address));
-        strlcpy(fields->code, lv_textarea_get_text(pair_code), sizeof(fields->code));
-        if (queue_setting((set_cmd_t){.action = SET_PAIR_DEVICE, .pair = fields})) {
+    char *link = strdup(lv_textarea_get_text(pair_address));
+    if (link) {
+        if (queue_setting((set_cmd_t){.action = SET_PAIR_DEVICE, .pair_link = link})) {
             lv_obj_add_state(pair_button, LV_STATE_DISABLED);
             lv_label_set_text(pair_status, "正在配对…");
             return;
         }
-        mbedtls_platform_zeroize(fields, sizeof(*fields));
-        free(fields);
+        mbedtls_platform_zeroize(link, strlen(link));
+        free(link);
     }
     lv_label_set_text(pair_status, "无法开始配对，请重试。");
 }
@@ -741,6 +725,13 @@ static void back_to_connection(lv_event_t *event)
     lv_screen_load(connection_scr);
 }
 
+static void pair_link_changed(lv_event_t *event)
+{
+    if (terminal_pair_link_invitation(lv_textarea_get_text(pair_address))) {
+        pair_device_clicked(event);
+    }
+}
+
 static void open_pair_page(lv_event_t *event)
 {
     (void)event;
@@ -748,31 +739,22 @@ static void open_pair_page(lv_event_t *event)
     if (!pair_scr) {
         lv_obj_t *body = NULL;
         pair_scr = create_subpage_shell("配对设备", &body, back_to_connection, NULL);
-        const char *server = terminal_server_url();
 
         lv_obj_t *frame = eink_textarea(body, eink_body_font(), 50, EINK_RADIUS_CONTROL, &pair_address);
         lv_obj_set_width(frame, LV_PCT(100));
-        lv_textarea_set_placeholder_text(pair_address, "HTTPS 服务域名");
-        lv_textarea_set_max_length(pair_address, TERMINAL_SERVER_SIZE - 1);
-        lv_textarea_set_text(pair_address, !strncmp(server, "https://", 8) ? server + 8 : server);
-        lv_obj_add_event_cb(pair_address, focus_pair_field, LV_EVENT_CLICKED, NULL);
-
-        frame = eink_textarea(body, eink_body_font(), 50, EINK_RADIUS_CONTROL, &pair_code);
-        lv_obj_set_width(frame, LV_PCT(100));
-        lv_textarea_set_placeholder_text(pair_code, "输入 10 位配对码");
-        lv_textarea_set_accepted_chars(pair_code, "0123456789");
-        lv_textarea_set_max_length(pair_code, 10);
-        lv_obj_add_event_cb(pair_code, focus_pair_field, LV_EVENT_CLICKED, NULL);
+        lv_textarea_set_placeholder_text(pair_address, "完整配对链接");
+        lv_textarea_set_max_length(pair_address, TERMINAL_PAIR_LINK_SIZE - 1);
+        lv_obj_add_event_cb(pair_address, pair_link_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
         pair_button = eink_outline_button(body, "配对并连接", eink_body_font(), 48, pair_device_clicked, NULL);
         lv_obj_set_width(pair_button, LV_PCT(100));
-        pair_status = eink_label(body, "在管理面板生成一次性配对码。", eink_small_font(), LV_TEXT_ALIGN_LEFT);
+        pair_status = eink_label(body, "在管理页点击「添加设备」并复制链接。", eink_small_font(), LV_TEXT_ALIGN_LEFT);
         lv_obj_set_width(pair_status, LV_PCT(100));
         pair_keyboard = lv_keyboard_create(pair_scr);
         eink_style_keyboard(pair_keyboard);
         lv_obj_set_size(pair_keyboard, LV_PCT(100), 218);
-        lv_keyboard_set_mode(pair_keyboard, LV_KEYBOARD_MODE_NUMBER);
-        lv_keyboard_set_textarea(pair_keyboard, pair_code);
+        lv_keyboard_set_mode(pair_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+        lv_keyboard_set_textarea(pair_keyboard, pair_address);
         lv_obj_add_event_cb(pair_keyboard, pair_device_clicked, LV_EVENT_READY, NULL);
         lv_obj_add_event_cb(pair_keyboard, back_to_connection, LV_EVENT_CANCEL, NULL);
     }

@@ -36,17 +36,20 @@ static bool valid_token(const char *token)
     return strlen(token) == TERMINAL_TOKEN_SIZE - 1 && strspn(token, alphabet) == strlen(token);
 }
 
-static bool normalize_server(const char *address, char server[TERMINAL_SERVER_SIZE])
+const char *terminal_pair_link_invitation(const char *link)
 {
-    const char *authority = !strncmp(address, "https://", 8) ? address + 8 : address;
-    size_t length = strcspn(authority, "/");
-    if (!length || length + 8 >= TERMINAL_SERVER_SIZE ||
-        (authority[length] && strcmp(authority + length, "/")) ||
-        strspn(authority, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.:[]") != length) {
-        return false;
-    }
-    snprintf(server, TERMINAL_SERVER_SIZE, "https://%.*s", (int)length, authority);
-    return true;
+    if (strncmp(link, "https://", 8)) return NULL;
+    const char *authority = link + 8;
+    size_t length = strspn(authority, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.:[]");
+    if (!length || length + 8 >= TERMINAL_SERVER_SIZE) return NULL;
+    const char *fragment = authority + length;
+    if (*fragment == '/') ++fragment;
+    if (strncmp(fragment, "#wm-pair=", 9)) return NULL;
+    const char *code = fragment + 9;
+    size_t first = strspn(code, "0123456789");
+    if (first == 10 && !code[10]) return code;
+    if (first == 5 && code[5] == '-' && strspn(code + 6, "0123456789") == 5 && !code[11]) return code;
+    return NULL;
 }
 
 void terminal_load_pairing(void)
@@ -113,17 +116,19 @@ static esp_err_t save_connection(void)
     return error;
 }
 
-bool terminal_pair_device(const char *address, const char *code, char *message, size_t size)
+bool terminal_pair_device(const char *link, char *message, size_t size)
 {
-    char server[TERMINAL_SERVER_SIZE];
-    if (!normalize_server(address, server)) {
-        strlcpy(message, "请输入 HTTPS 服务域名。", size);
+    const char *invitation = terminal_pair_link_invitation(link);
+    if (!invitation) {
+        strlcpy(message, "请输入管理页生成的完整配对链接。", size);
         return false;
     }
-    if (strlen(code) != 10 || strspn(code, "0123456789") != 10) {
-        strlcpy(message, "请输入 10 位配对码。", size);
-        return false;
-    }
+    char server[TERMINAL_SERVER_SIZE], code[11];
+    size_t origin_length = 8 + strcspn(link + 8, "/#");
+    memcpy(server, link, origin_length);
+    server[origin_length] = '\0';
+    memcpy(code, invitation, 5);
+    memcpy(code + 5, invitation + (invitation[5] == '-' ? 6 : 5), 6);
     if (terminal_network_acquire_link() != ESP_OK) {
         strlcpy(message, "网络未连接，请检查网络设置。", size);
         return false;
@@ -137,6 +142,12 @@ bool terminal_pair_device(const char *address, const char *code, char *message, 
             strlcpy(message, "无法生成设备凭据。", size);
             return false;
         }
+        uint8_t bytes[12];
+        esp_fill_random(bytes, sizeof(bytes));
+        memcpy(pending.device_id, "esp32-", 6);
+        for (size_t i = 0; i < sizeof(bytes); ++i) {
+            snprintf(pending.device_id + 6 + 2*i, 3, "%02x", bytes[i]);
+        }
     }
     cJSON *body = cJSON_CreateObject();
     int status = 0;
@@ -146,7 +157,7 @@ bool terminal_pair_device(const char *address, const char *code, char *message, 
         cJSON_AddStringToObject(body, "installation", wintermute_device_instance_id()) &&
         cJSON_AddStringToObject(body, "device_type", "esp32") &&
         cJSON_AddStringToObject(body, "device_name", WINTERMUTE_DEVICE_NAME)) {
-        reply = terminal_http_redeem_pairing(pending.server, body, &status);
+        reply = terminal_http_redeem_pairing(pending.server, pending.device_id, body, &status);
     }
     cJSON_Delete(body);
     terminal_network_release();
@@ -156,8 +167,12 @@ bool terminal_pair_device(const char *address, const char *code, char *message, 
     cJSON_Delete(reply);
     if (!valid) {
         const char *error = "连接失败，请检查服务地址后重试。";
-        if (status == 403) error = "配对码无效、已过期或已使用。";
+        if (status == 403) error = "配对链接无效、已过期或已使用。";
         if (status == 404) error = "后端尚未启用设备配对。";
+        if (status == 409) {
+            pending_code[0] = '\0';
+            error = "设备 ID 冲突，请重试。";
+        }
         if (status == 429) error = "尝试次数过多，请稍后再试。";
         strlcpy(message, error, size);
         return false;

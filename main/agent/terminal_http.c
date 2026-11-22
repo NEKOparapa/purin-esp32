@@ -148,13 +148,19 @@ cJSON *terminal_http_json_bounded(char *message, size_t size, esp_http_client_me
     return read_http_json(http, &buffer, message, size, body, expected, status_code);
 }
 
-cJSON *terminal_http_redeem_pairing(const char *server, const cJSON *body, int *status_code)
+cJSON *terminal_http_redeem_pairing(const char *server, const char *device_id, const cJSON *body, int *status_code)
 {
     const char route[] = "/v1/devices/pair";
     char url[TERMINAL_SERVER_SIZE + sizeof(route)];
     snprintf(url, sizeof(url), "%s%s", server, route);
     response_buffer_t buffer = {.limit = 4096};
     esp_http_client_handle_t http = make_http_client(url, HTTP_METHOD_POST, receive_http, &buffer);
+    if (!http) return NULL;
+    if (esp_http_client_set_header(http, "X-Device-ID", device_id) != ESP_OK ||
+        esp_http_client_set_header(http, "X-Device-Platform", "esp32") != ESP_OK) {
+        esp_http_client_cleanup(http);
+        return NULL;
+    }
     char message[72];
     return read_http_json(http, &buffer, message, sizeof(message), body, 200, status_code);
 }
