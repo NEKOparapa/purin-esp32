@@ -74,7 +74,7 @@ static const char *field(const cJSON *object, const char *key)
     return cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(object, key));
 }
 
-// IDs returned by Wintermute are opaque URL path segments.
+// IDs returned by Purin are opaque URL path segments.
 static bool valid_id(const char *id)
 {
     return id && *id && strlen(id) < AGENT_ID_BYTES &&
@@ -338,10 +338,10 @@ static void worker(void *arg)
 esp_err_t agent_client_init(void)
 {
     esp_err_t error = nvs_flash_init();
-    char journal_name[16] = "wm_chat";
+    char journal_name[16] = "pr_chat";
     if (terminal_is_paired()) {
         // A newly paired backend must never receive the previous connection's queued messages.
-        snprintf(journal_name, sizeof(journal_name), "wm_%.12s", wintermute_device_id() + 6);
+        snprintf(journal_name, sizeof(journal_name), "pr_%.12s", purin_device_id() + 6);
     }
     if (error == ESP_OK) error = nvs_open(journal_name, NVS_READWRITE, &journal);
     if (error != ESP_OK) return error;

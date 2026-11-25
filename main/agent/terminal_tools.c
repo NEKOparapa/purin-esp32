@@ -13,8 +13,8 @@
 #include "esp_timer.h"
 #include "mbedtls/sha256.h"
 
-#ifndef WINTERMUTE_DEVICE_STATUS_ENABLED
-#define WINTERMUTE_DEVICE_STATUS_ENABLED 0
+#ifndef PURIN_DEVICE_STATUS_ENABLED
+#define PURIN_DEVICE_STATUS_ENABLED 0
 #endif
 
 typedef struct {
@@ -79,7 +79,7 @@ static cJSON *claim(unsigned mask)
 {
     const char *names[APP_COUNT + 1];
     int count = 0;
-    if (WINTERMUTE_DEVICE_STATUS_ENABLED) names[count++] = "device_status";
+    if (PURIN_DEVICE_STATUS_ENABLED) names[count++] = "device_status";
     for (unsigned i = 0; i < APP_COUNT; ++i)
         if (mask & (1u << i)) names[count++] = app_ids[i];
     cJSON *body = cJSON_CreateObject();
@@ -99,7 +99,7 @@ static void execute(status_receipt_t *r, const cJSON *call)
     const cJSON *args = cJSON_GetObjectItemCaseSensitive(call, "arguments");
     strlcpy(r->output, "Invalid or disabled tool", sizeof(r->output));
     if (!tool || !cJSON_IsObject(args)) return;
-    if (WINTERMUTE_DEVICE_STATUS_ENABLED && !strcmp(tool, "device_status") && !args->child) {
+    if (PURIN_DEVICE_STATUS_ENABLED && !strcmp(tool, "device_status") && !args->child) {
         esp_chip_info_t chip;
         esp_chip_info(&chip);
         snprintf(r->output, sizeof(r->output),
@@ -155,10 +155,10 @@ static bool save_receipt(nvs_handle_t journal)
 void terminal_tools_poll(nvs_handle_t journal)
 {
     // Never send a cached result/token after the board has been reprovisioned.
-    char identity[sizeof(WINTERMUTE_SERVER_URL) + sizeof(WINTERMUTE_DEVICE_TOKEN) +
-                  sizeof(WINTERMUTE_DEVICE_ID) + TERMINAL_SERVER_SIZE + TERMINAL_TOKEN_SIZE + 31];
+    char identity[sizeof(PURIN_SERVER_URL) + sizeof(PURIN_DEVICE_TOKEN) +
+                  sizeof(PURIN_DEVICE_ID) + TERMINAL_SERVER_SIZE + TERMINAL_TOKEN_SIZE + 31];
     int length = snprintf(identity, sizeof(identity), "%s%c%s%c%s", terminal_server_url(), 0,
-                          wintermute_device_id(), 0, terminal_device_token());
+                          purin_device_id(), 0, terminal_device_token());
     uint8_t binding[32];
     if (length < 0 || (size_t)length >= sizeof(identity) ||
         mbedtls_sha256((const uint8_t *)identity, (size_t)length + 1, binding, 0) != 0) return;
@@ -190,7 +190,7 @@ void terminal_tools_poll(nvs_handle_t journal)
         key = "app_receipt";
     }
     unsigned mask = device_apps_mask();
-    if (!pending && !mask && !WINTERMUTE_DEVICE_STATUS_ENABLED && withdrew &&
+    if (!pending && !mask && !PURIN_DEVICE_STATUS_ENABLED && withdrew &&
         registered == (1u << APP_COUNT) - 1 && catalog_enabled == mask) return;
     if (terminal_network_acquire() != ESP_OK) return;
     if (!pending) {

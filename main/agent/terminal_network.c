@@ -51,13 +51,13 @@ static int64_t cellular_retry_at;
 static wifi_profile_t wifi_profile;
 static portMUX_TYPE wifi_profile_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static const char *const PREF_NAMESPACE = "wm_network";
+static const char *const PREF_NAMESPACE = "pr_network";
 static const char *const PREF_MODE = "mode";
 static const char *const PREF_WIFI = "wifi";
 
 static void reconnect_wifi_on_boot(void *unused);
 
-const char *wintermute_device_instance_id(void) { return factory_id; }
+const char *purin_device_instance_id(void) { return factory_id; }
 
 bool terminal_configured(void)
 {
@@ -239,7 +239,7 @@ esp_err_t terminal_network_init(void)
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     esp_err_t store_error = nvs_flash_init();
     if (store_error == ESP_OK) terminal_load_pairing();
-    ESP_LOGI("terminal", "Device: %s, device ID: %s", WINTERMUTE_DEVICE_NAME, wintermute_device_id());
+    ESP_LOGI("terminal", "Device: %s, device ID: %s", PURIN_DEVICE_NAME, purin_device_id());
     nvs_handle_t prefs;
     if (store_error == ESP_OK) store_error = nvs_open(PREF_NAMESPACE, NVS_READONLY, &prefs);
     if (store_error == ESP_OK) {
@@ -258,10 +258,10 @@ esp_err_t terminal_network_init(void)
         ESP_LOGW("terminal", "Load network preference: %s", esp_err_to_name(store_error));
     }
     // Preserve already flashed credentials as a fallback for devices upgraded in place.
-    if (!wifi_profile.ssid[0] && strlen(WINTERMUTE_WIFI_SSID) < sizeof(wifi_profile.ssid) &&
-        strlen(WINTERMUTE_WIFI_PASSWORD) < sizeof(wifi_profile.password)) {
-        strlcpy(wifi_profile.ssid, WINTERMUTE_WIFI_SSID, sizeof(wifi_profile.ssid));
-        strlcpy(wifi_profile.password, WINTERMUTE_WIFI_PASSWORD, sizeof(wifi_profile.password));
+    if (!wifi_profile.ssid[0] && strlen(PURIN_WIFI_SSID) < sizeof(wifi_profile.ssid) &&
+        strlen(PURIN_WIFI_PASSWORD) < sizeof(wifi_profile.password)) {
+        strlcpy(wifi_profile.ssid, PURIN_WIFI_SSID, sizeof(wifi_profile.ssid));
+        strlcpy(wifi_profile.password, PURIN_WIFI_PASSWORD, sizeof(wifi_profile.password));
     }
     network_lock = xSemaphoreCreateMutex();
     wifi_events = xEventGroupCreate();

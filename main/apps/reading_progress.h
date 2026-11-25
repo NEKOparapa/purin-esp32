@@ -2,7 +2,7 @@
 
 #include "library.h"
 
-#define COLLECTION_PREFS_NAMESPACE "wm_collection"
+#define COLLECTION_PREFS_NAMESPACE "pr_collection"
 #define READING_PROGRESS_PREF "reader_upload"
 
 // Called from the UI task at boot and when the upload preference is enabled.

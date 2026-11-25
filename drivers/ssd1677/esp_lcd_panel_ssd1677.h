@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * Modified for wintermute-esp32; see NOTICE.md.
+ * Modified for purin-esp32; see NOTICE.md.
  */
 #pragma once
 

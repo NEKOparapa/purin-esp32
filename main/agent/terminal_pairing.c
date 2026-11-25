@@ -22,7 +22,7 @@ static paired_connection_t paired;
 static paired_connection_t pending;
 static char pending_code[11];
 static unsigned char pairing_seed[32];
-static const char pairing_namespace[] = "wm_pairing";
+static const char pairing_namespace[] = "pr_pairing";
 
 static bool valid_id(const char *id)
 {
@@ -44,8 +44,8 @@ const char *terminal_pair_link_invitation(const char *link)
     if (!length || length + 8 >= TERMINAL_SERVER_SIZE) return NULL;
     const char *fragment = authority + length;
     if (*fragment == '/') ++fragment;
-    if (strncmp(fragment, "#wm-pair=", 9)) return NULL;
-    const char *code = fragment + 9;
+    if (strncmp(fragment, "#purin-pair=", 12)) return NULL;
+    const char *code = fragment + 12;
     size_t first = strspn(code, "0123456789");
     if (first == 10 && !code[10]) return code;
     if (first == 5 && code[5] == '-' && strspn(code + 6, "0123456789") == 5 && !code[11]) return code;
@@ -68,13 +68,13 @@ void terminal_load_pairing(void)
 }
 
 bool terminal_is_paired(void) { return paired.device_id[0] != '\0'; }
-const char *terminal_server_url(void) { return terminal_is_paired() ? paired.server : WINTERMUTE_SERVER_URL; }
-const char *terminal_device_token(void) { return terminal_is_paired() ? paired.token : WINTERMUTE_DEVICE_TOKEN; }
+const char *terminal_server_url(void) { return terminal_is_paired() ? paired.server : PURIN_SERVER_URL; }
+const char *terminal_device_token(void) { return terminal_is_paired() ? paired.token : PURIN_DEVICE_TOKEN; }
 
-const char *wintermute_device_id(void)
+const char *purin_device_id(void)
 {
     if (terminal_is_paired()) return paired.device_id;
-    return WINTERMUTE_DEVICE_ID[0] ? WINTERMUTE_DEVICE_ID : wintermute_device_instance_id();
+    return PURIN_DEVICE_ID[0] ? PURIN_DEVICE_ID : purin_device_instance_id();
 }
 
 void terminal_seed_pairing(void)
@@ -154,9 +154,9 @@ bool terminal_pair_device(const char *link, char *message, size_t size)
     cJSON *reply = NULL;
     if (cJSON_AddStringToObject(body, "code", pending_code) &&
         cJSON_AddStringToObject(body, "token", pending.token) &&
-        cJSON_AddStringToObject(body, "installation", wintermute_device_instance_id()) &&
+        cJSON_AddStringToObject(body, "installation", purin_device_instance_id()) &&
         cJSON_AddStringToObject(body, "device_type", "esp32") &&
-        cJSON_AddStringToObject(body, "device_name", WINTERMUTE_DEVICE_NAME)) {
+        cJSON_AddStringToObject(body, "device_name", PURIN_DEVICE_NAME)) {
         reply = terminal_http_redeem_pairing(pending.server, pending.device_id, body, &status);
     }
     cJSON_Delete(body);

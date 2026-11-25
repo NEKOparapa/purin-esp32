@@ -163,12 +163,12 @@ static bool write_mark(const char *space, const char *key, uint64_t value)
 
 static book_position_t book_position(const char *id)
 {
-    uint64_t exact = read_mark("wm_read_pos", id);
+    uint64_t exact = read_mark("pr_read_pos", id);
     if (exact)
         return (book_position_t){exact >> 32, (exact >> 16) & 0xffff, exact & 0xffff, true};
     nvs_handle_t marks;
     uint32_t legacy = 0x10001;
-    if (nvs_open("wm_bookmarks", NVS_READONLY, &marks) == ESP_OK) {
+    if (nvs_open("pr_bookmarks", NVS_READONLY, &marks) == ESP_OK) {
         nvs_get_u32(marks, id, &legacy);
         nvs_close(marks);
     }
@@ -425,7 +425,7 @@ static bool load_txt_section(const char *name, uint32_t number, library_section_
         return false;
     }
     txt_key(section->bookmark_key, name, &info);
-    uint64_t saved = !number ? read_mark("wm_txt_pos", section->bookmark_key) : 0;
+    uint64_t saved = !number ? read_mark("pr_txt_pos", section->bookmark_key) : 0;
     if (saved >= total) saved = 0;
     if (!number) number = saved / TXT_SECTION_BYTES + 1;
     if (number > (total - 1) / TXT_SECTION_BYTES + 1) return false;
@@ -492,8 +492,8 @@ bool library_save_position(const library_book_t *book, const library_section_t *
 {
     if (offset >= section->length) return false;
     if (book->local)
-        return write_mark("wm_txt_pos", section->bookmark_key, section->start + offset);
+        return write_mark("pr_txt_pos", section->bookmark_key, section->start + offset);
     unsigned page = characters_before(section->text, offset) / AGENT_PAGE_CHARS + 1;
     uint64_t position = ((uint64_t)section->number << 32) | (page << 16) | offset;
-    return write_mark("wm_read_pos", book->name, position);
+    return write_mark("pr_read_pos", book->name, position);
 }

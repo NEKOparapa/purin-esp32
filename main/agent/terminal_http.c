@@ -12,17 +12,17 @@ enum { MAX_RESPONSE = 128 * 1024 };
 
 esp_err_t terminal_set_auth_headers(esp_http_client_handle_t client)
 {
-    const unsigned char name[] = WINTERMUTE_DEVICE_NAME;
+    const unsigned char name[] = PURIN_DEVICE_NAME;
     unsigned char encoded[4 * ((sizeof(name) + 1) / 3) + 1];
     size_t length;
     if (mbedtls_base64_encode(encoded, sizeof(encoded), &length, name, sizeof(name) - 1) != 0)
         return ESP_ERR_INVALID_ARG;
     encoded[length] = 0;
-    esp_err_t rc = esp_http_client_set_header(client, "X-Device-ID", wintermute_device_id());
-    if (rc == ESP_OK) rc = esp_http_client_set_header(client, "X-Device-Instance", wintermute_device_instance_id());
+    esp_err_t rc = esp_http_client_set_header(client, "X-Device-ID", purin_device_id());
+    if (rc == ESP_OK) rc = esp_http_client_set_header(client, "X-Device-Instance", purin_device_instance_id());
     if (rc == ESP_OK) rc = esp_http_client_set_header(client, "X-Device-Name", (const char *)encoded);
-    if (rc == ESP_OK) rc = esp_http_client_set_header(client, "X-Device-Platform", WINTERMUTE_DEVICE_PLATFORM);
-    char auth[sizeof("Bearer ") + sizeof(WINTERMUTE_DEVICE_TOKEN) + TERMINAL_TOKEN_SIZE];
+    if (rc == ESP_OK) rc = esp_http_client_set_header(client, "X-Device-Platform", PURIN_DEVICE_PLATFORM);
+    char auth[sizeof("Bearer ") + sizeof(PURIN_DEVICE_TOKEN) + TERMINAL_TOKEN_SIZE];
     snprintf(auth, sizeof(auth), "Bearer %s", terminal_device_token());
     if (rc == ESP_OK) rc = esp_http_client_set_header(client, "Authorization", auth);
     mbedtls_platform_zeroize(auth, sizeof(auth));

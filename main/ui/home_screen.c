@@ -213,7 +213,7 @@ static void make_header(lv_obj_t *screen)
     lv_obj_set_style_pad_hor(header, HOME_MARGIN, 0);
     lv_obj_t *mark = home_glyph(header, HOME_MARK, 34);
     lv_obj_align(mark, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_t *wordmark = eink_label(header, "WINTERMUTE", &lv_font_montserrat_20, LV_TEXT_ALIGN_LEFT);
+    lv_obj_t *wordmark = eink_label(header, "PURIN", &lv_font_montserrat_20, LV_TEXT_ALIGN_LEFT);
     lv_obj_set_style_text_letter_space(wordmark, 2, 0);
     lv_obj_align(wordmark, LV_ALIGN_LEFT_MID, 44, 0);
 

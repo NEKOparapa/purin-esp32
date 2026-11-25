@@ -430,7 +430,7 @@ static void render_shelf(const reader_result_t *result)
     const cJSON *items = cJSON_GetObjectItemCaseSensitive(result->shelf, "items");
     int count = cJSON_GetArraySize(items);
     if (!count) {
-        show_shelf_message("书架为空", "将 TXT 复制到 SD 卡 Wintermute/Library，或让 Agent 推送书籍。");
+        show_shelf_message("书架为空", "将 TXT 复制到 SD 卡 Purin/Library，或让 Agent 推送书籍。");
     } else {
         lv_obj_clean(shelf_entries);
     }

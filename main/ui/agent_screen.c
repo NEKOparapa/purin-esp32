@@ -384,7 +384,7 @@ static void create_screen(void)
     lv_obj_set_flex_grow(input_frame, 1);
     active_textarea = draft;
     lv_textarea_set_max_length(draft, 192);
-    lv_textarea_set_placeholder_text(draft, "发消息给 Wintermute...");
+    lv_textarea_set_placeholder_text(draft, "发消息给 Purin...");
     lv_obj_add_event_cb(draft, action, LV_EVENT_CLICKED, (void *)(intptr_t)'e');
 
     send_button = eink_pill_button(composer_row, "发送", &home_controls, COMPOSER_CONTROL_HEIGHT,

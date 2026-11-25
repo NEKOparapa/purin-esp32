@@ -1,4 +1,4 @@
-# Wintermute ESP32 — Metalio E-Ink 4
+# Purin ESP32 — Metalio E-Ink 4
 
 基于 ESP-IDF 5.5.4 的录音和 Agent 设备。主页可进入对话，BOOT 长按录音，短按选择并确认上传。
 硬件为 ESP32-S3、16 MB Flash、Octal PSRAM、SSD1677 / GDEM0397T81 800×480 墨水屏。
@@ -11,7 +11,7 @@
 
 ## 屏上对话与信息采集
 
-后端分层重构保留了固件使用的聊天、通知、感知、提问、设备工具和音频上传协议，本端不使用旧 `/v1/profile`。`WINTERMUTE_SERVER_URL` 填服务根地址，不添加 `/v1`。相邻 Wintermute 后端仓库的 `uv run python tools/check_clients.py` 可验证固件请求字段、响应结构、音频重试去重和设备隔离；该检查不连接或烧录实体设备，硬件功能仍需实机验证。
+后端分层重构保留了固件使用的聊天、通知、感知、提问、设备工具和音频上传协议，本端不使用旧 `/v1/profile`。`PURIN_SERVER_URL` 填服务根地址，不添加 `/v1`。相邻 Purin 后端仓库的 `uv run python tools/check_clients.py` 可验证固件请求字段、响应结构、音频重试去重和设备隔离；该检查不连接或烧录实体设备，硬件功能仍需实机验证。
 
 - 触摸输入框，用屏幕键盘输入英文，点上方 **EN / 拼音** 切换输入法后可点选汉字，按 **Send** 发送。收到任务回执后，页面每 5 秒检查回复。上下滑动可阅读长文本。屏上使用 Noto Sans SC 的 GB2312 汉字子集，单次输入最多 192 字符。
 - **Retry** 重查最近一条问题。问题正文和客户端消息 ID 在发送前存入 NVS，任务 ID 收到后写回。断线或重启后再次进入可沿用原 ID 重试或读取最近任务。屏幕保留本次开机最近 16 条正文，跨重启保留最近问题和服务器任务引用。
@@ -38,7 +38,7 @@ Agent 调用震动器后，主页显示 10 秒震动提醒。实际震动时长�
 
 ## 离线阅读
 
-- 主页的「阅读」直接打开书架。有书时点书名开始阅读，书架没有内容时显示「书架为空」。将 UTF-8 编码的 `.txt` 文件复制到 SD 卡的 `Wintermute/Library/` 即可加入书架。TXT 支持 UTF-8 BOM 和 Windows 换行，长文件分段读取。
+- 主页的「阅读」直接打开书架。有书时点书名开始阅读，书架没有内容时显示「书架为空」。将 UTF-8 编码的 `.txt` 文件复制到 SD 卡的 `Purin/Library/` 即可加入书架。TXT 支持 UTF-8 BOM 和 Windows 换行，长文件分段读取。
 - 正文按 480×800 竖屏排版。音量减／加键、底部翻页按钮、轻点正文左右两侧或横向滑动均可翻页。Agent 推送的书可连续翻到相邻章节，也可用「上一章」「下一章」跳转。
 - 书签自动保存在设备中，重新打开书目会恢复阅读位置。Agent 书页显示章内页码，TXT 显示全书进度。Agent 工具继续使用每页 160 字的接口分页。
 - 开启「设置 → 信息采集 → 阅读进度上传」后，退出正文时会对比同一本书上次已上传或待上传的位置。位置变化时尝试向切片层发送阅读进度更新，断网后重试，离线期间按书保留最新待上传位置。上报包含书名和进度；TXT 使用文件内的字节位置，Agent 书目使用章节和屏幕页码。
@@ -203,7 +203,7 @@ I2S0 使用从机 Philips 32-bit stereo RX，外置音频模块提供 16 kHz WS�
 
 ```powershell
 Copy-Item config/upload_config.example.h config/upload_config.local.h
-# 编辑 upload_config.local.h，填写服务端地址、设备 token 和 WINTERMUTE_DEVICE_NAME
+# 编辑 upload_config.local.h，填写服务端地址、设备 token 和 PURIN_DEVICE_NAME
 idf.py build
 ```
 
@@ -245,7 +245,7 @@ HTTPS 使用 ESP-IDF 内置 CA 证书包验证主机证书，不跟随重定向�
 在 ESP-IDF PowerShell 中：
 
 ```powershell
-cd D:\Github\wintermute-esp32
+cd D:\Github\purin-esp32
 idf.py build
 idf.py -p COM9 flash monitor
 ```
@@ -263,19 +263,19 @@ $env:Path = 'D:\Espressif\python_env\idf5.5_py3.11_env\Scripts;' + $env:Path
 
 ## 主 Agent 查询设备状态
 
-在 `config/upload_config.local.h` 中填入 HTTPS 服务地址和设备凭据，设置 `#define WINTERMUTE_DEVICE_STATUS_ENABLED 1` 后编译、刷写。设备在 Agent 网络任务中约每 6 秒领取一次请求，提供 `device_status`，参数为 `{}`。返回的 JSON 包含板型、芯片、核心数、运行秒数和空闲堆内存字节数。设备在 NVS 中暂存待确认的结果，断网或重启后使用同一份结果重试。
+在 `config/upload_config.local.h` 中填入 HTTPS 服务地址和设备凭据，设置 `#define PURIN_DEVICE_STATUS_ENABLED 1` 后编译、刷写。设备在 Agent 网络任务中约每 6 秒领取一次请求，提供 `device_status`，参数为 `{}`。返回的 JSON 包含板型、芯片、核心数、运行秒数和空闲堆内存字节数。设备在 NVS 中暂存待确认的结果，断网或重启后使用同一份结果重试。
 
 ## ESP 设备连接器
 
-主页进入「设置 → 连接器」，点开应用即可本机试用。五个应用各有一个保存在设备上的远程连接开关，首次启动默认关闭。使用远程调用时，在上述本地配置中填写 HTTPS 服务地址和已绑定的设备凭据，构建并刷写后在设备上选择联网方式，再点所需应用右上角的「远程已关闭」开启远程调用。设备会向 Wintermute 同步应用名称和开关，各应用独立于 `WINTERMUTE_DEVICE_STATUS_ENABLED`。
+主页进入「设置 → 连接器」，点开应用即可本机试用。五个应用各有一个保存在设备上的远程连接开关，首次启动默认关闭。使用远程调用时，在上述本地配置中填写 HTTPS 服务地址和已绑定的设备凭据，构建并刷写后在设备上选择联网方式，再点所需应用右上角的「远程已关闭」开启远程调用。设备会向 Purin 同步应用名称和开关，各应用独立于 `PURIN_DEVICE_STATUS_ENABLED`。
 
 | 应用 | Agent 可调用的动作 | 设备表现与返回内容 |
 | --- | --- | --- |
 | 震动器 `esp_vibration` | `pulse`、`stop`、`status` | 一次短震 1–1000 毫秒，默认 100 毫秒。返回马达当前的开关状态。 |
-| 播放器 `esp_player` | `play`、`stop`、`status`、`list` | 省略文件名可试听内置双音，音量 1–100。将 16 kHz、16-bit PCM 单声道或双声道 WAV 放入 SD 卡的 `/Wintermute/Audio/`。文件名使用英文字母、数字、空格、点、下划线和连字符，以字母、数字、下划线或连字符开头。播放异步进行，查询可得到文件名、进度状态及错误原因。录音和播放共用音频硬件。 |
+| 播放器 `esp_player` | `play`、`stop`、`status`、`list` | 省略文件名可试听内置双音，音量 1–100。将 16 kHz、16-bit PCM 单声道或双声道 WAV 放入 SD 卡的 `/Purin/Audio/`。文件名使用英文字母、数字、空格、点、下划线和连字符，以字母、数字、下划线或连字符开头。播放异步进行，查询可得到文件名、进度状态及错误原因。录音和播放共用音频硬件。 |
 | 提示卡片 `esp_card` | `show`、`status` | 发送标题（最多 48 字）和正文（最多 240 字）。最新卡片显示在墨水屏上，用户点「我看过了」后，Agent 可查询卡片 ID、标题及确认状态。重启保留最近一张卡片。 |
 | 计时器 `esp_timer` | `start`、`stop`、`status` | 单次倒计时 1 秒至 24 小时，再次启动会替换当前倒计时。返回名称、剩余秒数和状态。断网继续走时，重启清零。到时在屏幕提示，开启震动器连接后还会短震一次。 |
-| 阅读书库 `esp_library` | `add`、`append`、`list`、`read` | 将纯文本保存到 SD 卡的 `/Wintermute/Library/`。先用 `add` 建书，长文用 `append` 从第 2 章起依次追加，每章最多 2500 字，共可有 999 章。可列出 Agent 书目和按章、页读取。Agent 查阅页不会改变设备上的阅读位置。 |
+| 阅读书库 `esp_library` | `add`、`append`、`list`、`read` | 将纯文本保存到 SD 卡的 `/Purin/Library/`。先用 `add` 建书，长文用 `append` 从第 2 章起依次追加，每章最多 2500 字，共可有 999 章。可列出 Agent 书目和按章、页读取。Agent 查阅页不会改变设备上的阅读位置。 |
 
 例如，对指定设备调用 `Mcp` 并传入下列参数，可启动 25 分钟专注计时。将 `<设备ID>` 替换为连接器列表中的设备 ID。
 

@@ -3,28 +3,28 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
-#ifdef WINTERMUTE_LOCAL_UPLOAD_CONFIG
+#ifdef PURIN_LOCAL_UPLOAD_CONFIG
 #include "upload_config.local.h"
 #else
 #include "upload_config.example.h"
 #endif
-#if !defined(WINTERMUTE_DEVICE_TOKEN) && defined(WINTERMUTE_TERMINAL_TOKEN)
-#define WINTERMUTE_DEVICE_TOKEN WINTERMUTE_TERMINAL_TOKEN
+#if !defined(PURIN_DEVICE_TOKEN) && defined(PURIN_TERMINAL_TOKEN)
+#define PURIN_DEVICE_TOKEN PURIN_TERMINAL_TOKEN
 #endif
-#ifndef WINTERMUTE_DEVICE_ID
-#ifdef WINTERMUTE_TERMINAL_ID
-#define WINTERMUTE_DEVICE_ID WINTERMUTE_TERMINAL_ID
+#ifndef PURIN_DEVICE_ID
+#ifdef PURIN_TERMINAL_ID
+#define PURIN_DEVICE_ID PURIN_TERMINAL_ID
 #else
-#define WINTERMUTE_DEVICE_ID ""
+#define PURIN_DEVICE_ID ""
 #endif
 #endif
-#ifndef WINTERMUTE_DEVICE_NAME
-#define WINTERMUTE_DEVICE_NAME "ESP32"
+#ifndef PURIN_DEVICE_NAME
+#define PURIN_DEVICE_NAME "ESP32"
 #endif
-#define WINTERMUTE_DEVICE_PLATFORM "esp32"
+#define PURIN_DEVICE_PLATFORM "esp32"
 
-const char *wintermute_device_id(void);
-const char *wintermute_device_instance_id(void);
+const char *purin_device_id(void);
+const char *purin_device_instance_id(void);
 
 typedef enum {
     TERMINAL_NETWORK_WIFI,

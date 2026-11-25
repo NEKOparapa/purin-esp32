@@ -1,7 +1,7 @@
 #pragma once
 #include "device_apps.h"
 #ifndef APP_STORAGE_ROOT
-#define APP_STORAGE_ROOT "/sdcard/Wintermute"
+#define APP_STORAGE_ROOT "/sdcard/Purin"
 #endif
 #define BOOK_DIR APP_STORAGE_ROOT "/Library"
 #define AUDIO_DIR APP_STORAGE_ROOT "/Audio"

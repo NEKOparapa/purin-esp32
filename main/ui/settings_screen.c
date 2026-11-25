@@ -768,9 +768,9 @@ static void open_connection_page(lv_event_t *event)
         lv_obj_t *body = NULL;
         connection_scr = create_subpage_shell("连接", &body, back_to_index, NULL);
         lv_obj_t *group = make_settings_card(body);
-        const char *device_id = wintermute_device_id();
+        const char *device_id = purin_device_id();
         const char *server = terminal_server_url();
-        make_info_row(group, "设备名称", WINTERMUTE_DEVICE_NAME, NULL);
+        make_info_row(group, "设备名称", PURIN_DEVICE_NAME, NULL);
         add_inset_divider(group);
         make_info_row(group, "设备平台", "ESP32-S3", NULL);
         add_inset_divider(group);

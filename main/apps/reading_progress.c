@@ -13,8 +13,8 @@
 #include "freertos/task.h"
 #include "nvs.h"
 
-static const char pending_namespace[] = "wm_read_pending";
-static const char sent_namespace[] = "wm_read_sent";
+static const char pending_namespace[] = "pr_read_pending";
+static const char sent_namespace[] = "pr_read_sent";
 enum { JOURNAL_KEY_SIZE = 16 };
 
 typedef struct {
@@ -51,7 +51,7 @@ static uint64_t hash_text(uint64_t hash, const char *text)
 static uint64_t upload_scope(void)
 {
     return hash_text(hash_text(UINT64_C(14695981039346656037), terminal_server_url()),
-                     wintermute_device_id());
+                     purin_device_id());
 }
 
 static uint64_t position(const reading_update_t *update)

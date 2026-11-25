@@ -20,5 +20,5 @@ idf_component_register(SRCS "app_main.c" "ui/eink_ui.c" "ui/home_screen.c" "ui/a
 # 检测本地配置的新增/移除，避免第一次复制凭据文件后增量构建仍沿用空模板。
 file(GLOB upload_local_config CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../config/upload_config.local.h")
 if(upload_local_config)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE WINTERMUTE_LOCAL_UPLOAD_CONFIG=1)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE PURIN_LOCAL_UPLOAD_CONFIG=1)
 endif()

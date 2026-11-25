@@ -27,7 +27,7 @@ static const int64_t notice_duration_us = 10 * 1000000LL;
 esp_err_t device_apps_init(void)
 {
     esp_err_t err = nvs_flash_init();
-    if (err == ESP_OK) err = nvs_open("wm_apps", NVS_READWRITE, &prefs);
+    if (err == ESP_OK) err = nvs_open("pr_apps", NVS_READWRITE, &prefs);
     if (err != ESP_OK) return err;
     lock = xSemaphoreCreateMutex();
     if (!lock) return ESP_ERR_NO_MEM;

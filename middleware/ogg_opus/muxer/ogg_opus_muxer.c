@@ -163,7 +163,7 @@ esp_err_t ogg_opus_muxer_create(const ogg_opus_muxer_config_t *config,
     if (error == ESP_OK) {
         error = emit_page(muxer, 2, 0); // BOS；OpusHead 必须单独占页。
     }
-    const char vendor[] = "wintermute-esp32";
+    const char vendor[] = "purin-esp32";
     uint8_t tags[16 + sizeof(vendor) - 1] = {0};
     memcpy(tags, "OpusTags", 8);
     put_u32(tags + 8, sizeof(vendor) - 1);

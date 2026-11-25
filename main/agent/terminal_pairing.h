@@ -4,7 +4,7 @@
 #include <stddef.h>
 
 enum { TERMINAL_SERVER_SIZE = 256, TERMINAL_TOKEN_SIZE = 44 };
-enum { TERMINAL_PAIR_LINK_SIZE = TERMINAL_SERVER_SIZE + sizeof("/#wm-pair=12345-12345") };
+enum { TERMINAL_PAIR_LINK_SIZE = TERMINAL_SERVER_SIZE + sizeof("/#purin-pair=12345-12345") };
 
 void terminal_load_pairing(void);
 void terminal_seed_pairing(void);

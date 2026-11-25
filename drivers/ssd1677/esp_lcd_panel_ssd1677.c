@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * Modified for wintermute-esp32: bounded waits, synchronous partial refresh,
+ * Modified for purin-esp32: bounded waits, synchronous partial refresh,
  * resource cleanup and argument validation. See NOTICE.md.
  */
 #include <string.h>
