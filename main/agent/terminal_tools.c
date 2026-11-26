@@ -152,7 +152,7 @@ static bool save_receipt(nvs_handle_t journal)
            nvs_commit(journal) == ESP_OK;
 }
 
-void terminal_tools_poll(nvs_handle_t journal)
+bool terminal_tools_poll(nvs_handle_t journal)
 {
     // Never send a cached result/token after the board has been reprovisioned.
     char identity[sizeof(PURIN_SERVER_URL) + sizeof(PURIN_DEVICE_TOKEN) +
@@ -161,7 +161,7 @@ void terminal_tools_poll(nvs_handle_t journal)
                           purin_device_id(), 0, terminal_device_token());
     uint8_t binding[32];
     if (length < 0 || (size_t)length >= sizeof(identity) ||
-        mbedtls_sha256((const uint8_t *)identity, (size_t)length + 1, binding, 0) != 0) return;
+        mbedtls_sha256((const uint8_t *)identity, (size_t)length + 1, binding, 0) != 0) return false;
     size_t size = sizeof(receipt);
     esp_err_t rc = nvs_get_blob(journal, "app_receipt", &receipt, &size);
     const char *key = "app_receipt";
@@ -178,24 +178,26 @@ void terminal_tools_poll(nvs_handle_t journal)
             strlcpy(receipt.output, old.output, sizeof(receipt.output));
             receipt.success = old.success;
             key = "tool_receipt";
-        } else if (rc == ESP_OK) return;
+        } else if (rc == ESP_OK) return false;
     } else if (rc == ESP_OK &&
                (size <= offsetof(status_receipt_t, output) ||
-                receipt.output[size - offsetof(status_receipt_t, output) - 1])) return;
-    if (rc != ESP_OK && rc != ESP_ERR_NVS_NOT_FOUND) return;
+                receipt.output[size - offsetof(status_receipt_t, output) - 1])) return false;
+    if (rc != ESP_OK && rc != ESP_ERR_NVS_NOT_FOUND) return false;
     bool pending = rc == ESP_OK;
     if (pending && memcmp(receipt.binding, binding, sizeof(binding))) {
-        if (nvs_erase_key(journal, key) != ESP_OK || nvs_commit(journal) != ESP_OK) return;
+        if (nvs_erase_key(journal, key) != ESP_OK || nvs_commit(journal) != ESP_OK) return false;
         pending = false;
         key = "app_receipt";
     }
     unsigned mask = device_apps_mask();
     if (!pending && !mask && !PURIN_DEVICE_STATUS_ENABLED && withdrew &&
-        registered == (1u << APP_COUNT) - 1 && catalog_enabled == mask) return;
-    if (terminal_network_acquire() != ESP_OK) return;
+        registered == (1u << APP_COUNT) - 1 && catalog_enabled == mask) return false;
+    if (terminal_network_acquire() != ESP_OK) return false;
+    bool touched = false;
     if (!pending) {
         sync_catalog(mask);
         cJSON *res = claim(device_apps_mask());
+        touched = res != NULL;
         const cJSON *call = cJSON_GetObjectItemCaseSensitive(res, "call");
         const char *id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(call, "id"));
         const char *token = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(call, "claim_token"));
@@ -213,6 +215,10 @@ void terminal_tools_poll(nvs_handle_t journal)
         }
         cJSON_Delete(res);
     }
-    if (pending && deliver(&receipt) && nvs_erase_key(journal, key) == ESP_OK) nvs_commit(journal);
+    if (pending && deliver(&receipt)) {
+        touched = true;
+        if (nvs_erase_key(journal, key) == ESP_OK) nvs_commit(journal);
+    }
     terminal_network_release();
+    return touched;
 }

@@ -7,6 +7,7 @@
 #include "lvgl_port.h"
 #include "reading_progress.h"
 #include "recorder.h"
+#include "terminal_http.h"
 #include "terminal_network.h"
 #include "terminal_pairing.h"
 
@@ -14,16 +15,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "mbedtls/platform_util.h"
 #include "nvs.h"
 
-enum { WIFI_SCAN_LIMIT = 16 };
+enum { WIFI_SCAN_LIMIT = 16, ONLINE_DEVICE_LIMIT = 24 };
 typedef enum {
-    SET_NETWORK_MODE, SET_WIFI_SCAN, SET_WIFI_JOIN, SET_READ_STORAGE, SET_PAIR_DEVICE
+    SET_NETWORK_MODE, SET_WIFI_SCAN, SET_WIFI_JOIN, SET_READ_STORAGE, SET_PAIR_DEVICE,
+    SET_READ_ONLINE_DEVICES
 } set_action_t;
+
+typedef struct {
+    char device_id[64];
+    char name[84];
+    char platform[24];
+    bool is_current;
+} online_device_info_t;
 
 typedef struct {
     set_action_t action;
@@ -44,6 +54,8 @@ typedef struct {
     uint64_t sd_total_bytes;
     uint64_t sd_free_bytes;
     esp_err_t sd_error;
+    size_t online_count;
+    online_device_info_t *online_devices;
 } set_res_t;
 
 static lv_obj_t *home_ref;
@@ -88,6 +100,14 @@ static lv_obj_t *sd_status_val;
 static lv_obj_t *sd_total_val;
 static lv_obj_t *sd_used_val;
 static lv_obj_t *sd_free_val;
+static lv_obj_t *online_devices_title;
+static lv_obj_t *online_devices_card;
+static online_device_info_t rendered_online[ONLINE_DEVICE_LIMIT];
+static size_t rendered_online_count;
+static bool rendered_online_valid;
+static bool rendered_online_ok;
+static char rendered_online_error[128];
+static int64_t online_next_refresh_us;
 
 static QueueHandle_t cmds, results;
 static bool busy;
@@ -103,7 +123,98 @@ static const char reading_upload_hint[] = "退出阅读时上报有变化的进�
 
 static void render_wifi_scan(const set_res_t *res);
 static void render_wifi_join(const set_res_t *res);
+static void render_online_devices(const set_res_t *res);
+static void request_online_devices_refresh(bool show_loading);
+static bool has_backend_credentials(void);
 static void ssid_label(char out[TERMINAL_WIFI_SSID_SIZE], const char *ssid);
+
+static void sanitize_label(char *out, size_t size, const char *src)
+{
+    strlcpy(out, src ? src : "", size);
+    for (char *c = out; *c; ++c) {
+        if ((unsigned char)*c < 0x20 || *c == 0x7f) *c = '?';
+    }
+}
+
+static const char *platform_label_zh(const char *platform, const char *device_type)
+{
+    if (platform) {
+        if (!strcmp(platform, "windows")) return "Windows";
+        if (!strcmp(platform, "macos")) return "macOS";
+        if (!strcmp(platform, "android")) return "Android";
+        if (!strcmp(platform, "ios")) return "iOS";
+        if (!strcmp(platform, "esp32")) return "ESP32";
+    }
+    if (device_type) {
+        if (!strcmp(device_type, "desktop")) return "桌面端";
+        if (!strcmp(device_type, "mobile")) return "手机";
+        if (!strcmp(device_type, "esp32")) return "ESP32";
+    }
+    return "设备";
+}
+
+static void fetch_online_devices(set_res_t *res)
+{
+    if (!terminal_configured()) {
+        strlcpy(res->error,
+                terminal_network_mode() == TERMINAL_NETWORK_OFF
+                    ? "网络已关闭，请先开启网络"
+                    : "请先在网络设置中连接网络",
+                sizeof(res->error));
+        return;
+    }
+    if (terminal_network_acquire() != ESP_OK) {
+        strlcpy(res->error, "网络未连接，请检查网络设置", sizeof(res->error));
+        return;
+    }
+    int status = 0;
+    char http_err[96] = {0};
+    cJSON *json = terminal_http_json_bounded(http_err, sizeof(http_err), HTTP_METHOD_GET,
+                                             "/v1/devices/online", NULL, 200, 16 * 1024, &status);
+    terminal_network_release();
+    if (!json) {
+        const char *msg = "读取失败，请点刷新重试";
+        if (status == 401) msg = "设备凭据无效，请重新配对";
+        else if (status == 404) msg = "后端不支持在线设备查询";
+        strlcpy(res->error, msg, sizeof(res->error));
+        return;
+    }
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(json, "items");
+    if (!cJSON_IsArray(items)) {
+        cJSON_Delete(json);
+        strlcpy(res->error, "服务返回格式无效", sizeof(res->error));
+        return;
+    }
+    int total = cJSON_GetArraySize(items);
+    if (total < 0) total = 0;
+    size_t cap = (size_t)total > ONLINE_DEVICE_LIMIT ? ONLINE_DEVICE_LIMIT : (size_t)total;
+    if (cap > 0) {
+        res->online_devices = calloc(cap, sizeof(*res->online_devices));
+        if (!res->online_devices) {
+            cJSON_Delete(json);
+            strlcpy(res->error, "内存不足，请点刷新重试", sizeof(res->error));
+            return;
+        }
+    }
+    size_t count = 0;
+    const cJSON *item = NULL;
+    cJSON_ArrayForEach(item, items) {
+        if (count >= cap) break;
+        const char *id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "device_id"));
+        if (!id || !*id) continue;
+        const char *name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "name"));
+        const char *platform = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "platform"));
+        const char *dtype = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "device_type"));
+        online_device_info_t *dst = &res->online_devices[count++];
+        sanitize_label(dst->device_id, sizeof(dst->device_id), id);
+        sanitize_label(dst->name, sizeof(dst->name), (name && *name) ? name : id);
+        strlcpy(dst->platform, platform_label_zh(platform, dtype), sizeof(dst->platform));
+        dst->is_current = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item, "is_current"));
+    }
+    cJSON_Delete(json);
+    res->online_count = count;
+    res->ok = true;
+}
 
 static const char *recorder_label_zh(void)
 {
@@ -150,6 +261,8 @@ static void settings_worker(void *unused)
             res.ok = terminal_pair_device(cmd.pair_link, res.error, sizeof(res.error));
             mbedtls_platform_zeroize(cmd.pair_link, strlen(cmd.pair_link));
             free(cmd.pair_link);
+        } else if (cmd.action == SET_READ_ONLINE_DEVICES) {
+            fetch_online_devices(&res);
         }
         xQueueSend(results, &res, portMAX_DELAY);
     }
@@ -401,7 +514,15 @@ static void poll_results(lv_timer_t *timer)
             } else {
                 lv_obj_remove_state(pair_button, LV_STATE_DISABLED);
             }
+        } else if (res.action == SET_READ_ONLINE_DEVICES) {
+            render_online_devices(&res);
+            free(res.online_devices);
         }
+    }
+    if (connection_scr && lv_screen_active() == connection_scr &&
+        has_backend_credentials() && !busy &&
+        esp_timer_get_time() >= online_next_refresh_us) {
+        request_online_devices_refresh(false);
     }
     refresh_network_state();
 }
@@ -761,12 +882,129 @@ static void open_pair_page(lv_event_t *event)
     lv_screen_load(pair_scr);
 }
 
+static bool has_backend_credentials(void)
+{
+    const char *server = terminal_server_url();
+    return terminal_is_paired() ||
+           (terminal_device_token()[0] != '\0' &&
+            (!strncmp(server, "https://", 8) || !strncmp(server, "http://", 7)));
+}
+
+static void make_online_device_row(lv_obj_t *parent, const online_device_info_t *dev)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    eink_style_clean_box(row);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_min_height(row, 72, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(row, 22, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(row, 14, LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 14, LV_PART_MAIN);
+
+    lv_obj_t *left = lv_obj_create(row);
+    eink_style_clean_box(left);
+    lv_obj_remove_flag(left, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_height(left, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(left, 1);
+    lv_obj_set_flex_flow(left, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(left, 4, LV_PART_MAIN);
+
+    char title[108];
+    if (dev->is_current) {
+        snprintf(title, sizeof(title), "%s（本机）", dev->name);
+    } else {
+        strlcpy(title, dev->name, sizeof(title));
+    }
+    lv_obj_t *name_lbl = eink_label(left, title, eink_body_font(), LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_width(name_lbl, LV_PCT(100));
+    lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_MODE_WRAP);
+
+    lv_obj_t *id_lbl = eink_label(left, dev->device_id, eink_small_font(), LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_width(id_lbl, LV_PCT(100));
+    lv_label_set_long_mode(id_lbl, LV_LABEL_LONG_MODE_WRAP);
+
+    char meta[40];
+    snprintf(meta, sizeof(meta), "%s\n在线", dev->platform);
+    lv_obj_t *right_lbl = eink_label(row, meta, eink_small_font(), LV_TEXT_ALIGN_RIGHT);
+    lv_obj_set_style_text_line_space(right_lbl, 4, LV_PART_MAIN);
+}
+
+static void render_online_devices(const set_res_t *res)
+{
+    if (!online_devices_card || !online_devices_title) return;
+    size_t bytes = res->online_count * sizeof(*res->online_devices);
+    if (rendered_online_valid && rendered_online_ok == res->ok) {
+        if (!res->ok && !strcmp(rendered_online_error, res->error)) return;
+        if (res->ok && rendered_online_count == res->online_count &&
+            (bytes == 0 || memcmp(rendered_online, res->online_devices, bytes) == 0)) {
+            return;
+        }
+    }
+
+    rendered_online_valid = true;
+    rendered_online_ok = res->ok;
+    rendered_online_count = res->online_count;
+    strlcpy(rendered_online_error, res->error, sizeof(rendered_online_error));
+    if (res->ok && bytes > 0) {
+        memcpy(rendered_online, res->online_devices, bytes);
+    }
+
+    if (res->ok) {
+        char heading[32];
+        snprintf(heading, sizeof(heading), "在线设备（%u）", (unsigned)res->online_count);
+        lv_label_set_text(online_devices_title, heading);
+    } else {
+        lv_label_set_text(online_devices_title, "在线设备");
+    }
+
+    lv_obj_clean(online_devices_card);
+    if (!res->ok) {
+        make_info_row(online_devices_card, "状态",
+                      res->error[0] ? res->error : "读取失败，请点刷新重试", NULL);
+        return;
+    }
+    if (res->online_count == 0) {
+        make_info_row(online_devices_card, "状态", "暂无在线设备", NULL);
+        return;
+    }
+    for (size_t i = 0; i < res->online_count; ++i) {
+        make_online_device_row(online_devices_card, &res->online_devices[i]);
+        if (i + 1 < res->online_count) add_inset_divider(online_devices_card);
+    }
+}
+
+static void request_online_devices_refresh(bool show_loading)
+{
+    if (!online_devices_card || !has_backend_credentials()) return;
+    ensure_worker();
+    online_next_refresh_us = esp_timer_get_time() + 10 * 1000000LL;
+    bool started = queue_setting((set_cmd_t){.action = SET_READ_ONLINE_DEVICES});
+    if (show_loading) {
+        rendered_online_valid = false;
+        lv_obj_clean(online_devices_card);
+        make_info_row(online_devices_card, "状态",
+                      started ? "正在读取…" : "暂时无法读取，请点刷新", NULL);
+    }
+}
+
+static void refresh_online_devices_clicked(lv_event_t *event)
+{
+    (void)event;
+    request_online_devices_refresh(true);
+}
+
 static void open_connection_page(lv_event_t *event)
 {
     (void)event;
+    const bool paired = has_backend_credentials();
     if (!connection_scr) {
         lv_obj_t *body = NULL;
-        connection_scr = create_subpage_shell("连接", &body, back_to_index, NULL);
+        connection_scr = create_subpage_shell("设备配对", &body, back_to_index,
+                                              paired ? refresh_online_devices_clicked : NULL);
         lv_obj_t *group = make_settings_card(body);
         const char *device_id = purin_device_id();
         const char *server = terminal_server_url();
@@ -779,8 +1017,17 @@ static void open_connection_page(lv_event_t *event)
         make_info_row(group, "服务地址", server[0] ? server : "未配置", NULL);
         lv_obj_t *button = eink_outline_button(body, "配对设备", eink_body_font(), 48, open_pair_page, NULL);
         lv_obj_set_width(button, LV_PCT(100));
+
+        if (paired) {
+            online_devices_title = eink_label(body, "在线设备", eink_body_font(), LV_TEXT_ALIGN_LEFT);
+            online_devices_card = make_settings_card(body);
+            make_info_row(online_devices_card, "状态", "正在读取…", NULL);
+        }
     }
     lv_screen_load(connection_scr);
+    if (paired) {
+        request_online_devices_refresh(!rendered_online_valid);
+    }
 }
 
 static void open_network_page(lv_event_t *event)
@@ -1026,7 +1273,7 @@ static void create_index_screen(void)
     // Keep the pressed row's outline clear of the surrounding card border.
     lv_obj_set_style_pad_all(group, 6, LV_PART_MAIN);
 
-    make_category_row(group, "连接", "", NULL, open_connection_page);
+    make_category_row(group, "设备配对", "", NULL, open_connection_page);
     add_inset_divider(group);
     make_category_row(group, "网络", "", &idx_network_val, open_network_page);
     add_inset_divider(group);

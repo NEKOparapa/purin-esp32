@@ -297,14 +297,30 @@ static void execute(const command_t *cmd, agent_result_t *result)
     terminal_network_release();
 }
 
+static bool ping_presence(void)
+{
+    if (!terminal_configured()) return false;
+    if (terminal_network_link_state() == TERMINAL_LINK_FAILED) return false;
+    if (terminal_network_acquire() != ESP_OK) return false;
+    char ignored[48];
+    cJSON *json = terminal_http_json_bounded(ignored, sizeof(ignored), HTTP_METHOD_GET,
+                                             "/v1/devices/online", NULL, 200, 16 * 1024, NULL);
+    bool ok = json != NULL;
+    cJSON_Delete(json);
+    terminal_network_release();
+    return ok;
+}
+
 static void worker(void *arg)
 {
     (void)arg;
     command_t cmd;
-    const bool accept_tools = terminal_tools_enabled();
     const TickType_t tool_period = pdMS_TO_TICKS(6000);
+    const TickType_t presence_period = pdMS_TO_TICKS(10000);
+    const TickType_t idle_check_period = pdMS_TO_TICKS(5000);
     const TickType_t state_period = pdMS_TO_TICKS(1500);
     TickType_t last_tool_poll = xTaskGetTickCount() - tool_period;
+    TickType_t last_presence = xTaskGetTickCount() - presence_period;
     for (;;) {
         bool has_state = false;
         if (state_lock) {
@@ -313,10 +329,18 @@ static void worker(void *arg)
             xSemaphoreGive(state_lock);
         }
 
-        TickType_t wait = portMAX_DELAY;
+        const bool configured = terminal_configured();
+        const bool accept_tools = terminal_tools_enabled();
+        const TickType_t now = xTaskGetTickCount();
+        TickType_t wait = terminal_device_token()[0] ? idle_check_period : portMAX_DELAY;
         if (accept_tools) {
-            TickType_t elapsed = xTaskGetTickCount() - last_tool_poll;
+            TickType_t elapsed = now - last_tool_poll;
             wait = elapsed < tool_period ? tool_period - elapsed : 0;
+        }
+        if (configured) {
+            TickType_t elapsed = now - last_presence;
+            TickType_t due = elapsed < presence_period ? presence_period - elapsed : 0;
+            if (wait == portMAX_DELAY || due < wait) wait = due;
         }
         if (has_state && (wait == portMAX_DELAY || state_period < wait)) {
             wait = state_period;
@@ -326,11 +350,17 @@ static void worker(void *arg)
             agent_result_t *result = calloc(1, sizeof(*result));
             if (result) execute(&cmd, result);
             xQueueSend(responses, &result, portMAX_DELAY);
+            last_presence = xTaskGetTickCount();
         }
         flush_recorder_state();
-        if (accept_tools && (xTaskGetTickCount() - last_tool_poll) >= tool_period) {
-            terminal_tools_poll(journal);
+        if (terminal_tools_enabled() && (xTaskGetTickCount() - last_tool_poll) >= tool_period) {
+            bool touched = terminal_tools_poll(journal);
             last_tool_poll = xTaskGetTickCount();
+            if (touched) last_presence = last_tool_poll;
+        }
+        if (terminal_configured() && (xTaskGetTickCount() - last_presence) >= presence_period) {
+            (void)ping_presence();
+            last_presence = xTaskGetTickCount();
         }
     }
 }
