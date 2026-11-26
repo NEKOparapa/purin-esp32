@@ -7,25 +7,37 @@
 #include "lvgl_port.h"
 #include "reading_progress.h"
 #include "recorder.h"
+#include "qr_scanner.h"
 #include "terminal_http.h"
 #include "terminal_network.h"
 #include "terminal_pairing.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mbedtls/platform_util.h"
 #include "nvs.h"
 
-enum { WIFI_SCAN_LIMIT = 16, ONLINE_DEVICE_LIMIT = 24 };
+enum {
+    WIFI_SCAN_LIMIT = 16,
+    ONLINE_DEVICE_LIMIT = 24,
+    QR_PREVIEW_W = 384,
+    QR_PREVIEW_H = 288,
+    QR_PREVIEW_STRIDE = QR_PREVIEW_W / 8,
+    QR_PREVIEW_PALETTE = 8,
+    QR_PREVIEW_BYTES = QR_PREVIEW_STRIDE * QR_PREVIEW_H,
+};
 typedef enum {
     SET_NETWORK_MODE, SET_WIFI_SCAN, SET_WIFI_JOIN, SET_READ_STORAGE, SET_PAIR_DEVICE,
-    SET_READ_ONLINE_DEVICES
+    SET_QR_PAIR, SET_READ_ONLINE_DEVICES
 } set_action_t;
 
 typedef struct {
@@ -46,6 +58,7 @@ typedef struct {
 typedef struct {
     set_action_t action;
     bool ok;
+    bool canceled;
     char error[128];
     size_t ap_count;
     terminal_wifi_ap_t aps[WIFI_SCAN_LIMIT];
@@ -66,6 +79,17 @@ static lv_obj_t *pair_address;
 static lv_obj_t *pair_keyboard;
 static lv_obj_t *pair_button;
 static lv_obj_t *pair_status;
+static lv_obj_t *qr_pair_scr;
+static lv_obj_t *qr_preview_img;
+static lv_obj_t *qr_pair_status;
+static lv_obj_t *qr_retry_button;
+static lv_image_dsc_t qr_preview_dsc;
+static uint8_t *qr_preview_front;
+static uint8_t *qr_preview_stage;
+static SemaphoreHandle_t qr_preview_lock;
+static bool qr_preview_dirty;
+static char qr_live_status[128];
+static atomic_bool qr_scan_cancel;
 static lv_obj_t *network_scr;
 static lv_obj_t *wifi_scan_scr;
 static lv_obj_t *wifi_password_scr;
@@ -102,7 +126,7 @@ static lv_obj_t *sd_used_val;
 static lv_obj_t *sd_free_val;
 static lv_obj_t *online_devices_title;
 static lv_obj_t *online_devices_card;
-static online_device_info_t rendered_online[ONLINE_DEVICE_LIMIT];
+static online_device_info_t *rendered_online;
 static size_t rendered_online_count;
 static bool rendered_online_valid;
 static bool rendered_online_ok;
@@ -123,10 +147,145 @@ static const char reading_upload_hint[] = "退出阅读时上报有变化的进�
 
 static void render_wifi_scan(const set_res_t *res);
 static void render_wifi_join(const set_res_t *res);
-static void render_online_devices(const set_res_t *res);
+static void render_online_devices(set_res_t *res);
 static void request_online_devices_refresh(bool show_loading);
 static bool has_backend_credentials(void);
+static bool can_restart(void);
 static void ssid_label(char out[TERMINAL_WIFI_SSID_SIZE], const char *ssid);
+
+static bool is_purin_pair_qr(const char *payload)
+{
+    if (!payload) return false;
+    while (*payload == ' ' || *payload == '\t' || *payload == '\r' || *payload == '\n') ++payload;
+    char trimmed[TERMINAL_PAIR_LINK_SIZE];
+    strlcpy(trimmed, payload, sizeof(trimmed));
+    size_t len = strlen(trimmed);
+    while (len > 0 && (trimmed[len - 1] == ' ' || trimmed[len - 1] == '\t' ||
+                       trimmed[len - 1] == '\r' || trimmed[len - 1] == '\n')) {
+        trimmed[--len] = '\0';
+    }
+    return terminal_pair_link_invitation(trimmed) != NULL;
+}
+
+static void publish_qr_live_status(const char *status)
+{
+    if (!qr_preview_lock || !status) return;
+    xSemaphoreTake(qr_preview_lock, portMAX_DELAY);
+    strlcpy(qr_live_status, status, sizeof(qr_live_status));
+    xSemaphoreGive(qr_preview_lock);
+}
+
+static void run_qr_pair(set_res_t *res)
+{
+    qr_scanner_handle_t scanner = qr_scanner_create();
+    uint8_t *preview_tmp = qr_preview_stage
+        ? heap_caps_malloc(QR_PREVIEW_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : NULL;
+    if (!scanner) {
+        free(preview_tmp);
+        strlcpy(res->error, "内存不足，请点重试。", sizeof(res->error));
+        return;
+    }
+    if (atomic_load(&qr_scan_cancel)) {
+        free(preview_tmp);
+        qr_scanner_destroy(scanner);
+        res->canceled = true;
+        return;
+    }
+
+    esp_err_t cam_err = board_camera_open();
+    if (cam_err != ESP_OK) {
+        free(preview_tmp);
+        qr_scanner_destroy(scanner);
+        if (atomic_load(&qr_scan_cancel)) {
+            res->canceled = true;
+            return;
+        }
+        if (cam_err == ESP_ERR_TIMEOUT) {
+            strlcpy(res->error, "未检测到板载摄像头，请点重试或改用链接配对。", sizeof(res->error));
+        } else if (cam_err == ESP_ERR_NOT_FOUND) {
+            strlcpy(res->error, "摄像头视频流初始化失败，请点重试。", sizeof(res->error));
+        } else if (cam_err == ESP_ERR_NO_MEM) {
+            strlcpy(res->error, "内存不足，请点重试。", sizeof(res->error));
+        } else {
+            strlcpy(res->error, "摄像头启动失败，请点重试。", sizeof(res->error));
+        }
+        return;
+    }
+
+    publish_qr_live_status("请将管理页的配对二维码对准摄像头…");
+    const int64_t deadline = esp_timer_get_time() + 60LL * 1000000;
+    int64_t last_preview_us = 0;
+    bool warned_other_qr = false;
+    char link[TERMINAL_PAIR_LINK_SIZE] = {0};
+
+    while (!atomic_load(&qr_scan_cancel) && esp_timer_get_time() < deadline) {
+        uint8_t *jpeg = NULL;
+        size_t jpeg_len = 0;
+        esp_err_t err = board_camera_capture_jpeg(&jpeg, &jpeg_len, 1000);
+        if (err == ESP_ERR_TIMEOUT) continue;
+        if (err != ESP_OK) {
+            strlcpy(res->error, "摄像头连接中断，请点重试。", sizeof(res->error));
+            break;
+        }
+
+        const int64_t now = esp_timer_get_time();
+        const bool want_preview = preview_tmp && qr_preview_lock && (now - last_preview_us >= 450000);
+        bool any_qr = false;
+        char raw_qr[TERMINAL_PAIR_LINK_SIZE + 16] = {0};
+        err = qr_scanner_decode_jpeg(scanner, jpeg, jpeg_len,
+                                     want_preview ? preview_tmp : NULL,
+                                     QR_PREVIEW_W, QR_PREVIEW_H,
+                                     raw_qr, sizeof(raw_qr),
+                                     is_purin_pair_qr, &any_qr);
+        free(jpeg);
+
+        if (err == ESP_OK && want_preview) {
+            xSemaphoreTake(qr_preview_lock, portMAX_DELAY);
+            memcpy(qr_preview_stage, preview_tmp, QR_PREVIEW_BYTES);
+            qr_preview_dirty = true;
+            xSemaphoreGive(qr_preview_lock);
+            last_preview_us = now;
+        }
+
+        if (raw_qr[0]) {
+            const char *p = raw_qr;
+            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+            strlcpy(link, p, sizeof(link));
+            size_t len = strlen(link);
+            while (len > 0 && (link[len - 1] == ' ' || link[len - 1] == '\t' ||
+                               link[len - 1] == '\r' || link[len - 1] == '\n')) {
+                link[--len] = '\0';
+            }
+            mbedtls_platform_zeroize(raw_qr, sizeof(raw_qr));
+            break;
+        }
+        if (any_qr && !warned_other_qr) {
+            warned_other_qr = true;
+            publish_qr_live_status("请扫描 Purin 管理页「添加设备」生成的二维码。");
+        }
+    }
+
+    // Release USB camera, mux, and OTG power before redeeming the invitation over HTTPS.
+    board_camera_close();
+    free(preview_tmp);
+    qr_scanner_destroy(scanner);
+
+    if (atomic_load(&qr_scan_cancel)) {
+        mbedtls_platform_zeroize(link, sizeof(link));
+        res->canceled = true;
+        return;
+    }
+    if (link[0]) {
+        (void)board_vibration_pulse(0);
+        publish_qr_live_status("已识别配对码，正在连接配对…");
+        res->ok = terminal_pair_device(link, res->error, sizeof(res->error));
+        mbedtls_platform_zeroize(link, sizeof(link));
+        return;
+    }
+    if (!res->error[0]) {
+        strlcpy(res->error, "扫码超时，请点右上角「重试」继续扫码。", sizeof(res->error));
+    }
+}
 
 static void sanitize_label(char *out, size_t size, const char *src)
 {
@@ -261,6 +420,8 @@ static void settings_worker(void *unused)
             res.ok = terminal_pair_device(cmd.pair_link, res.error, sizeof(res.error));
             mbedtls_platform_zeroize(cmd.pair_link, strlen(cmd.pair_link));
             free(cmd.pair_link);
+        } else if (cmd.action == SET_QR_PAIR) {
+            run_qr_pair(&res);
         } else if (cmd.action == SET_READ_ONLINE_DEVICES) {
             fetch_online_devices(&res);
         }
@@ -494,6 +655,24 @@ static void restart_after_pairing(lv_timer_t *timer)
 static void poll_results(lv_timer_t *timer)
 {
     (void)timer;
+    if (qr_pair_scr && qr_preview_lock) {
+        bool refresh_preview = false;
+        char status_copy[sizeof(qr_live_status)] = {0};
+        xSemaphoreTake(qr_preview_lock, portMAX_DELAY);
+        if (qr_live_status[0]) {
+            strlcpy(status_copy, qr_live_status, sizeof(status_copy));
+            qr_live_status[0] = '\0';
+        }
+        if (qr_preview_dirty && qr_preview_front && lv_screen_active() == qr_pair_scr) {
+            memcpy(qr_preview_front + QR_PREVIEW_PALETTE, qr_preview_stage, QR_PREVIEW_BYTES);
+            qr_preview_dirty = false;
+            refresh_preview = true;
+        }
+        xSemaphoreGive(qr_preview_lock);
+        if (status_copy[0] && qr_pair_status) lv_label_set_text(qr_pair_status, status_copy);
+        if (refresh_preview && qr_preview_img) lv_obj_invalidate(qr_preview_img);
+    }
+
     set_res_t res;
     if (results && xQueueReceive(results, &res, 0) == pdTRUE) {
         busy = false;
@@ -513,6 +692,17 @@ static void poll_results(lv_timer_t *timer)
                 lv_timer_create(restart_after_pairing, 1000, NULL);
             } else {
                 lv_obj_remove_state(pair_button, LV_STATE_DISABLED);
+            }
+        } else if (res.action == SET_QR_PAIR) {
+            if (!res.canceled && qr_pair_status) {
+                lv_label_set_text(qr_pair_status, res.ok ? "已配对，正在重启连接…" : res.error);
+                if (res.ok) {
+                    lv_timer_create(restart_after_pairing, 1000, NULL);
+                } else if (qr_retry_button) {
+                    lv_obj_remove_state(qr_retry_button, LV_STATE_DISABLED);
+                }
+            } else if (qr_retry_button) {
+                lv_obj_remove_state(qr_retry_button, LV_STATE_DISABLED);
             }
         } else if (res.action == SET_READ_ONLINE_DEVICES) {
             render_online_devices(&res);
@@ -853,13 +1043,157 @@ static void pair_link_changed(lv_event_t *event)
     }
 }
 
+static void open_qr_pair_page(lv_event_t *event);
+
+static void back_from_qr_pair(lv_event_t *event)
+{
+    (void)event;
+    atomic_store(&qr_scan_cancel, true);
+    lv_screen_load(connection_scr);
+}
+
+static void clear_qr_preview(void)
+{
+    if (!qr_preview_front) return;
+    lv_color32_t *palette = (lv_color32_t *)qr_preview_front;
+    palette[0] = lv_color_to_32(lv_color_black(), LV_OPA_COVER);
+    palette[1] = lv_color_to_32(lv_color_white(), LV_OPA_COVER);
+    memset(qr_preview_front + QR_PREVIEW_PALETTE, 0xFF, QR_PREVIEW_BYTES);
+    if (qr_preview_img) lv_obj_invalidate(qr_preview_img);
+}
+
+static void start_qr_pair_scan(void)
+{
+    ensure_worker();
+    clear_qr_preview();
+    if (!can_restart()) {
+        lv_label_set_text(qr_pair_status, "请先结束录音再扫码配对。");
+        if (qr_retry_button) lv_obj_remove_state(qr_retry_button, LV_STATE_DISABLED);
+        return;
+    }
+    if (terminal_network_mode() == TERMINAL_NETWORK_OFF) {
+        lv_label_set_text(qr_pair_status, "网络已关闭，请先在网络设置中开启连接。");
+        if (qr_retry_button) lv_obj_remove_state(qr_retry_button, LV_STATE_DISABLED);
+        return;
+    }
+    if (qr_preview_lock) {
+        xSemaphoreTake(qr_preview_lock, portMAX_DELAY);
+        qr_preview_dirty = false;
+        qr_live_status[0] = '\0';
+        xSemaphoreGive(qr_preview_lock);
+    }
+    atomic_store(&qr_scan_cancel, false);
+    if (queue_setting((set_cmd_t){.action = SET_QR_PAIR})) {
+        if (qr_retry_button) lv_obj_add_state(qr_retry_button, LV_STATE_DISABLED);
+        lv_label_set_text(qr_pair_status, "正在启动摄像头…");
+    } else {
+        lv_label_set_text(qr_pair_status, "设备正忙，请稍后点「重试」。");
+        if (qr_retry_button) lv_obj_remove_state(qr_retry_button, LV_STATE_DISABLED);
+    }
+}
+
+static void retry_qr_pair_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (busy) return;
+    start_qr_pair_scan();
+}
+
+static void open_qr_pair_page(lv_event_t *event)
+{
+    (void)event;
+    ensure_worker();
+    if (!qr_preview_lock) qr_preview_lock = xSemaphoreCreateMutex();
+    if (!qr_preview_front) {
+        qr_preview_front = heap_caps_malloc(QR_PREVIEW_PALETTE + QR_PREVIEW_BYTES,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (!qr_preview_stage) {
+        qr_preview_stage = heap_caps_malloc(QR_PREVIEW_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (!qr_pair_scr) {
+        qr_pair_scr = lv_obj_create(NULL);
+        eink_style_screen(qr_pair_scr);
+        lv_obj_set_flex_flow(qr_pair_scr, LV_FLEX_FLOW_COLUMN);
+
+        lv_obj_t *right_slot = NULL;
+        eink_top_bar_font(qr_pair_scr, "扫码配对", eink_heading_font(), back_from_qr_pair, &right_slot);
+        if (right_slot) {
+            qr_retry_button = eink_outline_button(right_slot, "重试", eink_small_font(), 40,
+                                                  retry_qr_pair_clicked, NULL);
+            lv_obj_set_style_pad_hor(qr_retry_button, 14, LV_PART_MAIN);
+        }
+
+        lv_obj_t *body = lv_obj_create(qr_pair_scr);
+        eink_style_clean_box(body);
+        lv_obj_set_width(body, LV_PCT(100));
+        lv_obj_set_flex_grow(body, 1);
+        lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_pad_all(body, EINK_PAD_X, LV_PART_MAIN);
+        lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(body, 18, LV_PART_MAIN);
+
+        lv_obj_t *card = make_settings_card(body);
+        lv_obj_set_style_pad_all(card, 18, LV_PART_MAIN);
+        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+        if (qr_preview_front) {
+            clear_qr_preview();
+            qr_preview_dsc = (lv_image_dsc_t){
+                .header = {
+                    .magic = LV_IMAGE_HEADER_MAGIC,
+                    .cf = LV_COLOR_FORMAT_I1,
+                    .w = QR_PREVIEW_W,
+                    .h = QR_PREVIEW_H,
+                    .stride = QR_PREVIEW_STRIDE,
+                },
+                .data_size = QR_PREVIEW_PALETTE + QR_PREVIEW_BYTES,
+                .data = qr_preview_front,
+            };
+            qr_preview_img = lv_image_create(card);
+            lv_image_set_src(qr_preview_img, &qr_preview_dsc);
+        }
+
+        qr_pair_status = eink_label(body, "", eink_body_font(), LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_width(qr_pair_status, LV_PCT(100));
+        lv_label_set_long_mode(qr_pair_status, LV_LABEL_LONG_MODE_WRAP);
+
+        lv_obj_t *hint = eink_label(body, "在管理页点击「添加设备」，将生成的配对二维码置于取景框中央。",
+                                    eink_small_font(), LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_width(hint, LV_PCT(100));
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_MODE_WRAP);
+    }
+    lv_screen_load(qr_pair_scr);
+    start_qr_pair_scan();
+}
+
 static void open_pair_page(lv_event_t *event)
 {
     (void)event;
     ensure_worker();
     if (!pair_scr) {
         lv_obj_t *body = NULL;
-        pair_scr = create_subpage_shell("配对设备", &body, back_to_connection, NULL);
+        pair_scr = lv_obj_create(NULL);
+        eink_style_screen(pair_scr);
+        lv_obj_set_flex_flow(pair_scr, LV_FLEX_FLOW_COLUMN);
+
+        lv_obj_t *right_slot = NULL;
+        eink_top_bar_font(pair_scr, "配对设备", eink_heading_font(), back_to_connection, &right_slot);
+        if (right_slot) {
+            lv_obj_t *scan_btn = eink_outline_button(right_slot, "扫码", eink_small_font(), 40,
+                                                     open_qr_pair_page, NULL);
+            lv_obj_set_style_pad_hor(scan_btn, 14, LV_PART_MAIN);
+        }
+
+        body = lv_obj_create(pair_scr);
+        eink_style_clean_box(body);
+        lv_obj_set_width(body, LV_PCT(100));
+        lv_obj_set_flex_grow(body, 1);
+        lv_obj_set_scroll_dir(body, LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_style_pad_all(body, EINK_PAD_X, LV_PART_MAIN);
+        lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(body, 18, LV_PART_MAIN);
 
         lv_obj_t *frame = eink_textarea(body, eink_body_font(), 50, EINK_RADIUS_CONTROL, &pair_address);
         lv_obj_set_width(frame, LV_PCT(100));
@@ -933,14 +1267,15 @@ static void make_online_device_row(lv_obj_t *parent, const online_device_info_t 
     lv_obj_set_style_text_line_space(right_lbl, 4, LV_PART_MAIN);
 }
 
-static void render_online_devices(const set_res_t *res)
+static void render_online_devices(set_res_t *res)
 {
     if (!online_devices_card || !online_devices_title) return;
     size_t bytes = res->online_count * sizeof(*res->online_devices);
     if (rendered_online_valid && rendered_online_ok == res->ok) {
         if (!res->ok && !strcmp(rendered_online_error, res->error)) return;
         if (res->ok && rendered_online_count == res->online_count &&
-            (bytes == 0 || memcmp(rendered_online, res->online_devices, bytes) == 0)) {
+            (bytes == 0 || (rendered_online && res->online_devices &&
+                            memcmp(rendered_online, res->online_devices, bytes) == 0))) {
             return;
         }
     }
@@ -949,8 +1284,11 @@ static void render_online_devices(const set_res_t *res)
     rendered_online_ok = res->ok;
     rendered_online_count = res->online_count;
     strlcpy(rendered_online_error, res->error, sizeof(rendered_online_error));
+    free(rendered_online);
+    rendered_online = NULL;
     if (res->ok && bytes > 0) {
-        memcpy(rendered_online, res->online_devices, bytes);
+        rendered_online = res->online_devices;
+        res->online_devices = NULL;
     }
 
     if (res->ok) {
@@ -972,7 +1310,7 @@ static void render_online_devices(const set_res_t *res)
         return;
     }
     for (size_t i = 0; i < res->online_count; ++i) {
-        make_online_device_row(online_devices_card, &res->online_devices[i]);
+        make_online_device_row(online_devices_card, &rendered_online[i]);
         if (i + 1 < res->online_count) add_inset_divider(online_devices_card);
     }
 }
@@ -1015,8 +1353,20 @@ static void open_connection_page(lv_event_t *event)
         make_info_row(group, "设备 ID", device_id[0] ? device_id : "未生成", NULL);
         add_inset_divider(group);
         make_info_row(group, "服务地址", server[0] ? server : "未配置", NULL);
-        lv_obj_t *button = eink_outline_button(body, "配对设备", eink_body_font(), 48, open_pair_page, NULL);
-        lv_obj_set_width(button, LV_PCT(100));
+
+        lv_obj_t *actions = lv_obj_create(body);
+        eink_style_clean_box(actions);
+        lv_obj_remove_flag(actions, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(actions, LV_PCT(100), 48);
+        lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_column(actions, 10, LV_PART_MAIN);
+
+        lv_obj_t *scan_button = eink_outline_button(actions, "扫码配对", eink_body_font(), 48,
+                                                    open_qr_pair_page, NULL);
+        lv_obj_set_flex_grow(scan_button, 1);
+        lv_obj_t *link_button = eink_outline_button(actions, "输入链接", eink_body_font(), 48,
+                                                    open_pair_page, NULL);
+        lv_obj_set_flex_grow(link_button, 1);
 
         if (paired) {
             online_devices_title = eink_label(body, "在线设备", eink_body_font(), LV_TEXT_ALIGN_LEFT);
@@ -1306,10 +1656,11 @@ void settings_screen_open(lv_obj_t *home_screen)
 void settings_screen_hide(void)
 {
     lv_obj_t *active = lv_screen_active();
+    atomic_store(&qr_scan_cancel, true);
     if (wifi_password && active == wifi_password_scr) lv_textarea_set_text(wifi_password, "");
     if (home_ref &&
         (active == index_scr || active == connection_scr || active == pair_scr ||
-         active == network_scr || active == wifi_scan_scr ||
+         active == qr_pair_scr || active == network_scr || active == wifi_scan_scr ||
          active == wifi_password_scr || active == connectors_scr ||
          active == appearance_scr || active == collection_scr || active == storage_scr)) {
         lv_screen_load(home_ref);

@@ -100,6 +100,18 @@ esp_err_t board_set_speaker_power(bool on)
     return tca9555_write_outputs(expander, BOARD_IO_PA_ENABLE_MASK, on ? BOARD_IO_PA_ENABLE_MASK : 0);
 }
 
+i2c_master_bus_handle_t board_i2c_bus(void)
+{
+    return initialized ? board_bus : NULL;
+}
+
+esp_err_t board_set_usb_camera_mux(bool camera)
+{
+    if (!initialized || !expander) return ESP_ERR_INVALID_STATE;
+    return tca9555_write_outputs(expander, BOARD_IO_USB_MUX_MASK,
+                                 camera ? 0 : BOARD_IO_USB_MUX_MASK);
+}
+
 esp_err_t board_touch_init(cst816s_touch_handle_t *touch, board_touch_orientation_t *orientation)
 {
     ESP_RETURN_ON_FALSE(touch && orientation, ESP_ERR_INVALID_ARG, TAG, "NULL touch output");

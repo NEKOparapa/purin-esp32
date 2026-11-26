@@ -9,10 +9,12 @@ set(EXTRA_COMPONENT_DIRS
     "drivers/sdcard"
     "drivers/vibration"
     "drivers/i2s_microphone"
+    "drivers/usb_host_uvc"
     "middleware/lvgl_port"
     "middleware/ogg_opus"
     "middleware/audio_capture"
     "middleware/recording_storage"
+    "middleware/qr_scanner"
 )
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 idf_build_set_property(MINIMAL_BUILD ON)

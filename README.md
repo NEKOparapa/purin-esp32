@@ -57,6 +57,7 @@ drivers/                  独立、可复用的硬件驱动
   sdcard/                 SDMMC 1-bit + FatFS
   vibration/              马达脉冲与自动关断
   i2s_microphone/         I2S 从机双路原始采集、短读与丢帧检测
+  usb_host_uvc/           USB Host UVC 摄像头驱动
 
 board/                    本板供电、接线、总线和设备初始化
   include/board.h         板级公开接口
@@ -80,6 +81,9 @@ middleware/recording_storage/ PCM 分段保存与顺序索引
   recording_writer.c     切片、周期同步、正常收尾与异常中止
   recording_store.c      内部目录/文件命名、改名与索引提交
 
+middleware/qr_scanner/    MJPEG 灰度解码、1-bit 取景预览与二维码识别
+  include/qr_scanner.h
+
 main/                     应用层
   app_main.c              初始化与 UI 任务
   ui/                    录音主页、触屏对话、键盘和收件箱
@@ -90,7 +94,7 @@ main/                     应用层
 
 只有 `board` 的实现读取 `board_config.h`。驱动不依赖板型、LVGL 或应用；
 板级层不创建页面；适配层不包含业务界面。应用使用板级与图形接口。
-根 `CMakeLists.txt` 注册 6 个驱动、1 个板级和 4 个中间件组件。
+根 `CMakeLists.txt` 注册 7 个驱动、1 个板级和 5 个中间件组件。
 
 录音数据流为：
 
@@ -197,7 +201,7 @@ I2S0 使用从机 Philips 32-bit stereo RX，外置音频模块提供 16 kHz WS�
 界面 `Audio accepted for processing` 仅表示全部分段被服务端 HTTP 202 接收，ASR、总结和记忆写入在服务端异步进行。
 当前不在重启后自动重传，也不提供停止录音后的历史文件选择。
 
-先在设备上连好 Wi-Fi 或移动网络，在后端 HTTPS 管理面板点击「添加设备」。进入设备的「设置 → 设备配对 → 配对设备」，在输入框填入完整配对链接。设备会自动提交名称、设备 ID 和 ESP32 平台，保存连接后重启。
+先在设备上连好 Wi-Fi 或移动网络，在后端 HTTPS 管理面板点击「添加设备」。进入设备的「设置 → 设备配对」，可点击「扫码配对」用板载摄像头扫描管理页二维码（带墨水屏实时取景框与识别短震反馈），或点击「输入链接」手动填入完整配对链接。设备会自动提交名称、设备 ID 和 ESP32 平台，保存连接后重启。
 
 编译期设备配置仍可用于已有设备和本机 HTTP 调试：
 

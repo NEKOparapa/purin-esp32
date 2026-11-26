@@ -11,7 +11,7 @@ idf_component_register(SRCS "app_main.c" "ui/eink_ui.c" "ui/home_screen.c" "ui/a
                             "apps/reading_progress.c"
                             "apps/player.c" "ui/device_apps_screen.c" "ui/reader_screen.c" "ui/reader_layout.c"
                             "recording/recorder.c" "upload/audio_upload.c"
-                       PRIV_REQUIRES board lvgl_port audio_capture recording_storage esp_timer
+                       PRIV_REQUIRES board lvgl_port audio_capture recording_storage qr_scanner esp_timer
                                      esp_http_client esp_wifi esp_netif nvs_flash mbedtls esp_event json spi_flash
                                      bootloader_support
                        PRIV_INCLUDE_DIRS "ui" "recording" "upload" "agent" "apps" "../config"

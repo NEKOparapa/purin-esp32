@@ -273,7 +273,10 @@ esp_err_t terminal_network_init(void)
         return ESP_ERR_NO_MEM;
     }
     error = network_stack_init();
-    if (terminal_network_mode() == TERMINAL_NETWORK_WIFI && wifi_profile.ssid[0] &&
+    if (error == ESP_OK && terminal_network_mode() == TERMINAL_NETWORK_WIFI) {
+        error = wifi_init();
+    }
+    if (error == ESP_OK && terminal_network_mode() == TERMINAL_NETWORK_WIFI && wifi_profile.ssid[0] &&
         xTaskCreate(reconnect_wifi_on_boot, "wifi_boot", 6144, NULL, 1, NULL) != pdPASS) {
         ESP_LOGW("terminal", "Cannot start Wi-Fi reconnect task");
     }
@@ -397,7 +400,12 @@ esp_err_t terminal_wifi_scan(terminal_wifi_ap_t *aps, size_t capacity, size_t *c
         else if (!(xEventGroupGetBits(wifi_events) & WIFI_CONNECTED)) (void)esp_wifi_connect();
     }
     xSemaphoreGive(network_lock);
-    if (error != ESP_OK) ESP_LOGW("terminal", "Wi-Fi scan failed: %s", esp_err_to_name(error));
+    if (error != ESP_OK) {
+        const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        ESP_LOGW("terminal", "Wi-Fi scan failed: %s (internal free=%u, largest=%u)",
+                 esp_err_to_name(error), (unsigned)heap_caps_get_free_size(caps),
+                 (unsigned)heap_caps_get_largest_free_block(caps));
+    }
     return error;
 }
 

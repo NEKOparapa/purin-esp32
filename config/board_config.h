@@ -38,6 +38,8 @@
 #define BOARD_IO_EXPANDER_ADDRESS    0x20         // TCA9555 的 7 位 I2C 地址
 #define BOARD_IO_EXPANDER_I2C_HZ     100000       // 扩展器速率：100 kHz
 #define BOARD_IO_EXPANDER_INT_GPIO   GPIO_NUM_2   // TCA9555 中断输出
+#define BOARD_CHARGER_I2C_ADDRESS    0x6B         // CX25601N 充电/OTG 芯片地址（摄像头 5V OTG 供电）
+#define BOARD_CHARGER_I2C_HZ         400000       // CX25601N I2C 速率：400 kHz
 
 /* CST816S 触摸：原生坐标为竖向 480×800，显示坐标变换由触摸适配层完成。 */
 #define BOARD_TOUCH_I2C_ADDRESS      0x15         // CST816S 的 7 位 I2C 地址
