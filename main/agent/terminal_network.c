@@ -257,12 +257,6 @@ esp_err_t terminal_network_init(void)
     if (store_error != ESP_OK && store_error != ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGW("terminal", "Load network preference: %s", esp_err_to_name(store_error));
     }
-    // Preserve already flashed credentials as a fallback for devices upgraded in place.
-    if (!wifi_profile.ssid[0] && strlen(PURIN_WIFI_SSID) < sizeof(wifi_profile.ssid) &&
-        strlen(PURIN_WIFI_PASSWORD) < sizeof(wifi_profile.password)) {
-        strlcpy(wifi_profile.ssid, PURIN_WIFI_SSID, sizeof(wifi_profile.ssid));
-        strlcpy(wifi_profile.password, PURIN_WIFI_PASSWORD, sizeof(wifi_profile.password));
-    }
     network_lock = xSemaphoreCreateMutex();
     wifi_events = xEventGroupCreate();
     if (!network_lock || !wifi_events) {

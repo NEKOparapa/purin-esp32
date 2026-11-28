@@ -5,7 +5,9 @@
 #include <dirent.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -13,6 +15,17 @@
 #include <unistd.h>
 
 enum { AGENT_PAGE_CHARS = 160, TXT_SECTION_BYTES = 8192 };
+
+static library_book_t opened_book;
+static pthread_mutex_t bookmark_lock = PTHREAD_MUTEX_INITIALIZER;
+static atomic_uint reader_version, shelf_version;
+
+unsigned library_shelf_version(void) { return atomic_load(&shelf_version); }
+
+bool library_section_current(const library_section_t *section)
+{
+    return section->version == atomic_load(&reader_version);
+}
 
 cJSON *media_list(const char *dir, int offset, media_name_fn valid, media_entry_fn entry,
                   char *error, size_t size)
@@ -139,15 +152,19 @@ typedef struct {
     bool exact;
 } book_position_t;
 
-static uint64_t read_mark(const char *space, const char *key)
+static bool find_mark(const char *space, const char *key, uint64_t *value)
 {
     nvs_handle_t marks;
+    if (nvs_open(space, NVS_READONLY, &marks) != ESP_OK) return false;
+    esp_err_t err = nvs_get_u64(marks, key, value);
+    nvs_close(marks);
+    return err == ESP_OK;
+}
+
+static uint64_t read_mark(const char *space, const char *key)
+{
     uint64_t value = 0;
-    if (nvs_open(space, NVS_READONLY, &marks) == ESP_OK) {
-        nvs_get_u64(marks, key, &value);
-        nvs_close(marks);
-    }
-    return value;
+    return find_mark(space, key, &value) ? value : 0;
 }
 
 static bool write_mark(const char *space, const char *key, uint64_t value)
@@ -166,13 +183,7 @@ static book_position_t book_position(const char *id)
     uint64_t exact = read_mark("pr_read_pos", id);
     if (exact)
         return (book_position_t){exact >> 32, (exact >> 16) & 0xffff, exact & 0xffff, true};
-    nvs_handle_t marks;
-    uint32_t legacy = 0x10001;
-    if (nvs_open("pr_bookmarks", NVS_READONLY, &marks) == ESP_OK) {
-        nvs_get_u32(marks, id, &legacy);
-        nvs_close(marks);
-    }
-    return (book_position_t){.chapter = legacy >> 16, .page = legacy & 0xffff};
+    return (book_position_t){.chapter = 1, .page = 1};
 }
 
 static bool continuation(unsigned char c)
@@ -207,86 +218,14 @@ static bool chapter_exists(const char *id, unsigned chapter)
     return stat(path, &info) == 0 && S_ISREG(info.st_mode);
 }
 
-static cJSON *read_page(const char *id, const cJSON *args, char *error, size_t size)
-{
-    int chapter = app_number(args, "chapter", 1, 999, 1);
-    char path[96];
-    chapter_path(path, id, chapter);
-    cJSON *book = chapter > 0 && chapter <= 999 ? load_book(path) : NULL;
-    const char *text = app_text(book, "text", 2500), *title = app_text(book, "title", 48);
-    if (!text || !title) {
-        cJSON_Delete(book);
-        return app_error(error, size, "Book missing or invalid");
-    }
-    unsigned chars = characters_before(text, strlen(text));
-    int pages = (chars + AGENT_PAGE_CHARS - 1) / AGENT_PAGE_CHARS;
-    int page = app_number(args, "page", 1, pages, 1);
-    cJSON *out = NULL;
-    if (page < 1) {
-        app_error(error, size, "Page outside book");
-    } else {
-        const char *start = text + byte_at_character(text, (page - 1) * AGENT_PAGE_CHARS);
-        const char *end = start + byte_at_character(start, AGENT_PAGE_CHARS);
-        char chunk[AGENT_PAGE_CHARS * 4 + 1];
-        memcpy(chunk, start, end - start);
-        chunk[end - start] = 0;
-        out = cJSON_CreateObject();
-        if (out) {
-            cJSON_AddStringToObject(out, "id", id);
-            cJSON_AddStringToObject(out, "title", title);
-            cJSON_AddStringToObject(out, "text", chunk);
-            cJSON_AddNumberToObject(out, "page", page);
-            cJSON_AddNumberToObject(out, "pages", pages);
-            book_position_t saved = book_position(id);
-            cJSON_AddNumberToObject(out, "chapter", chapter);
-            cJSON_AddBoolToObject(out, "next_chapter", chapter_exists(id, chapter + 1));
-            cJSON_AddNumberToObject(out, "bookmark_chapter", saved.chapter);
-            cJSON_AddNumberToObject(out, "bookmark_page", saved.page);
-        }
-    }
-    cJSON_Delete(book);
-    return out;
-}
-
-cJSON *library_call(const cJSON *args, char *error, size_t size)
-{
-    const char *action = app_text(args, "action", 16);
-    if (!action) return app_error(error, size, "Missing library action");
-    board_sdcard_info_t info;
-    if (board_sdcard_mount(&info) != ESP_OK) return app_error(error, size, "SD card busy or unavailable");
-    cJSON *out = NULL;
-    if (!strcmp(action, "list")) {
-        out = media_list(BOOK_DIR, app_number(args, "offset", 0, 65535, 0), book_name, book_entry, error, size);
-    } else {
-        const char *id = app_text(args, "id", 12);
-        if (!book_id(id)) app_error(error, size, "Invalid book ID");
-        else {
-            char path[96];
-            chapter_path(path, id, 1);
-            if (!strcmp(action, "add")) out = add_book(path, args, error, size);
-            else if (!strcmp(action, "read")) out = read_page(id, args, error, size);
-            else if (!strcmp(action, "append")) {
-                int chapter = app_number(args, "chapter", 2, 999, -1);
-                struct stat info;
-                chapter_path(path, id, chapter - 1);
-                if (chapter < 2 || stat(path, &info) != 0) app_error(error, size, "Previous chapter required");
-                else { chapter_path(path, id, chapter); out = add_book(path, args, error, size); }
-            }
-            else app_error(error, size, "Unknown library action");
-        }
-    }
-    if (board_sdcard_unmount() != ESP_OK) {
-        cJSON_Delete(out);
-        return app_error(error, size, "SD card unmount failed");
-    }
-    return out;
-}
-
 static bool txt_name(const char *name)
 {
+    if (!name) return false;
     size_t len = strlen(name);
-    return len > 4 && len < LIBRARY_FILENAME_SIZE && !strcasecmp(name + len - 4, ".txt") &&
-           !strchr(name, '/') && !strchr(name, '\\');
+    if (len <= 4 || len >= LIBRARY_FILENAME_SIZE || strcasecmp(name + len - 4, ".txt") ||
+        strpbrk(name, "/\\:*?\"<>|")) return false;
+    for (size_t i = 0; i < len; ++i) if ((unsigned char)name[i] < 32) return false;
+    return true;
 }
 
 static bool shelf_name(const char *name)
@@ -308,22 +247,9 @@ static cJSON *shelf_entry(const char *name)
     return item;
 }
 
-cJSON *library_shelf(int offset, char *error, size_t size)
-{
-    board_sdcard_info_t info;
-    if (board_sdcard_mount(&info) != ESP_OK)
-        return app_error(error, size, "SD 卡不可用或正被占用");
-    cJSON *out = media_list(BOOK_DIR, offset, shelf_name, shelf_entry, error, size);
-    if (board_sdcard_unmount() != ESP_OK) {
-        cJSON_Delete(out);
-        return app_error(error, size, "SD 卡卸载失败");
-    }
-    if (!out) return app_error(error, size, "无法读取书目");
-    return out;
-}
-
 static bool load_pushed_section(const char *id, uint32_t number, library_section_t *section)
 {
+    if (!chapter_exists(id, 1)) return false;
     book_position_t saved = {0};
     if (!number) {
         saved = book_position(id);
@@ -363,6 +289,52 @@ static void txt_key(char key[16], const char *name, const struct stat *info)
     hash = (hash ^ (uint64_t)info->st_size) * UINT64_C(1099511628211);
     hash = (hash ^ (uint64_t)info->st_mtime) * UINT64_C(1099511628211);
     snprintf(key, 16, "%015" PRIx64, hash & UINT64_C(0xfffffffffffffff));
+}
+
+static cJSON *local_shelf_entry(const char *name)
+{
+    cJSON *item = shelf_entry(name);
+    if (!item) return NULL;
+    const char *id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "id"));
+    if (id) {
+        book_position_t saved = book_position(id);
+        if (saved.exact && chapter_exists(id, saved.chapter))
+            cJSON_AddNumberToObject(item, "shelf_bookmark", saved.chapter);
+    } else {
+        char path[sizeof(BOOK_DIR) + LIBRARY_FILENAME_SIZE], key[16];
+        snprintf(path, sizeof(path), "%s/%s", BOOK_DIR, name);
+        struct stat info;
+        if (stat(path, &info) == 0 && info.st_size > 0 && (uint64_t)info.st_size <= INT32_MAX) {
+            txt_key(key, name, &info);
+            uint64_t saved;
+            if (find_mark("pr_txt_pos", key, &saved) && saved < (uint64_t)info.st_size)
+                cJSON_AddNumberToObject(item, "shelf_bookmark", saved * 100 / info.st_size);
+        }
+    }
+    return item;
+}
+
+cJSON *library_shelf(int offset, book_cover_t *covers[LIBRARY_SHELF_PAGE_SIZE], char *error, size_t size)
+{
+    board_sdcard_info_t info;
+    if (board_sdcard_mount(&info) != ESP_OK)
+        return app_error(error, size, "SD 卡不可用或正被占用");
+    cJSON *out = media_list(BOOK_DIR, offset, shelf_name, local_shelf_entry, error, size);
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(out, "items");
+    for (int i = 0; i < cJSON_GetArraySize(items) && i < LIBRARY_SHELF_PAGE_SIZE; ++i) {
+        const cJSON *item = cJSON_GetArrayItem(items, i);
+        const char *file = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "file"));
+        const char *id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "id"));
+        char name[24];
+        if (id) snprintf(name, sizeof(name), "b_%s.json", id);
+        if (file || id) covers[i] = book_cover_load(file ? file : name);
+    }
+    if (board_sdcard_unmount() != ESP_OK) {
+        cJSON_Delete(out);
+        return app_error(error, size, "SD 卡卸载失败");
+    }
+    if (!out) return app_error(error, size, "无法读取书目");
+    return out;
 }
 
 // Adjacent sections use the same boundary. Move past UTF-8 tails and keep CRLF together.
@@ -460,6 +432,189 @@ static bool load_txt_section(const char *name, uint32_t number, library_section_
     return true;
 }
 
+static cJSON *read_book_page(const library_book_t *book, const cJSON *args, char *error, size_t size)
+{
+    int limit = book->local ? INT32_MAX / TXT_SECTION_BYTES + 1 : 999;
+    int chapter = app_number(args, "chapter", 1, limit, 1);
+    library_section_t section = {0};
+    if (chapter < 1) return app_error(error, size, "Chapter outside book");
+    if (book->local) {
+        if (!load_txt_section(book->name, chapter, &section, error, size)) {
+            free(section.text);
+            return NULL;
+        }
+    } else if (!load_pushed_section(book->name, chapter, &section)) {
+        return app_error(error, size, "Book missing or invalid");
+    }
+    unsigned chars = characters_before(section.text, section.length);
+    int pages = (chars + AGENT_PAGE_CHARS - 1) / AGENT_PAGE_CHARS;
+    int page = app_number(args, "page", 1, pages, 1);
+    if (page < 1) {
+        free(section.text);
+        return app_error(error, size, "Page outside book");
+    }
+    char *start = section.text + byte_at_character(section.text, (page - 1) * AGENT_PAGE_CHARS);
+    start[byte_at_character(start, AGENT_PAGE_CHARS)] = 0;
+    cJSON *out = cJSON_CreateObject();
+    bool ok = out && cJSON_AddStringToObject(out, book->local ? "file" : "id", book->name) &&
+              cJSON_AddStringToObject(out, "title", section.title) &&
+              cJSON_AddStringToObject(out, "text", start) &&
+              cJSON_AddNumberToObject(out, "page", page) && cJSON_AddNumberToObject(out, "pages", pages) &&
+              cJSON_AddNumberToObject(out, "chapter", chapter) && cJSON_AddBoolToObject(out, "next_chapter", section.next);
+    if (ok && !book->local) {
+        book_position_t saved = book_position(book->name);
+        ok = cJSON_AddNumberToObject(out, "bookmark_chapter", saved.chapter) &&
+             cJSON_AddNumberToObject(out, "bookmark_page", saved.page);
+    }
+    free(section.text);
+    if (!ok) { cJSON_Delete(out); return app_error(error, size, "Cannot allocate book page"); }
+    return out;
+}
+
+// FatFS accepts short aliases and case-insensitive lookups. Resolve the exact
+// name returned by list before using a remote filename for a read or deletion.
+static bool listed_txt(const char *name)
+{
+    DIR *dir = opendir(BOOK_DIR);
+    if (!dir) return false;
+    struct dirent *entry;
+    bool found = false;
+    while ((entry = readdir(dir))) {
+        if (entry->d_type != DT_DIR && !strcmp(entry->d_name, name)) { found = true; break; }
+    }
+    closedir(dir);
+    return found;
+}
+
+static bool forget_book(const library_book_t *book, const char *key)
+{
+    pthread_mutex_lock(&bookmark_lock);
+    if (book->local == opened_book.local && !strcmp(book->name, opened_book.name)) {
+        opened_book.name[0] = 0;
+        atomic_fetch_add(&reader_version, 1);
+    }
+    nvs_handle_t marks;
+    esp_err_t err = nvs_open(book->local ? "pr_txt_pos" : "pr_read_pos", NVS_READWRITE, &marks);
+    if (err == ESP_OK) {
+        err = nvs_erase_key(marks, key);
+        if (err == ESP_OK) err = nvs_commit(marks);
+        else if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+        nvs_close(marks);
+    }
+    pthread_mutex_unlock(&bookmark_lock);
+    return err == ESP_OK;
+}
+
+static bool clear_chapters(const char *id)
+{
+    DIR *dir = opendir(BOOK_DIR);
+    if (!dir) return false;
+    char prefix[16];
+    size_t length = snprintf(prefix, sizeof(prefix), "b_%s_", id);
+    uint8_t present[125] = {0}; // One bit for each possible chapter on the reader worker's stack.
+    struct dirent *entry;
+    for (;;) {
+        errno = 0;
+        entry = readdir(dir);
+        if (!entry) break;
+        const char *name = entry->d_name;
+        if (entry->d_type == DT_DIR || strlen(name) != length + 7 || strncasecmp(name, prefix, length)) continue;
+        const char *digits = name + length;
+        if (strspn(digits, "0123456789") != 3 || strcasecmp(digits + 3, ".seg")) continue;
+        int number = atoi(digits);
+        if (number >= 2) present[number / 8] |= 1u << (number % 8);
+    }
+    bool ok = !errno;
+    closedir(dir);
+    for (int number = 2; ok && number <= 999; ++number) {
+        if (!(present[number / 8] & (1u << (number % 8)))) continue;
+        char path[96];
+        chapter_path(path, id, number);
+        ok = unlink(path) == 0;
+    }
+    return ok;
+}
+
+static cJSON *manage_book(const cJSON *args, bool *changed, char *error, size_t size)
+{
+    const char *action = app_text(args, "action", 16);
+    if (!action) return app_error(error, size, "Missing library action");
+    if (!strcmp(action, "list"))
+        return media_list(BOOK_DIR, app_number(args, "offset", 0, 65535, 0), shelf_name, shelf_entry, error, size);
+
+    const char *id = app_text(args, "id", 12);
+    const cJSON *file_arg = cJSON_GetObjectItemCaseSensitive(args, "file");
+    const char *file = cJSON_GetStringValue(file_arg);
+    library_book_t book = {.local = file_arg != NULL};
+    if (file_arg) {
+        if (cJSON_GetObjectItemCaseSensitive(args, "id") || !txt_name(file))
+            return app_error(error, size, "Specify only an exact TXT filename");
+        if (!listed_txt(file)) return app_error(error, size, "TXT file not found");
+        strlcpy(book.name, file, sizeof(book.name));
+    } else {
+        if (!book_id(id)) return app_error(error, size, "Invalid book ID");
+        strlcpy(book.name, id, sizeof(book.name));
+    }
+    if (!strcmp(action, "read")) return read_book_page(&book, args, error, size);
+
+    struct stat info;
+    if (book.local) {
+        if (strcmp(action, "delete")) return app_error(error, size, "Unknown TXT action");
+        char path[sizeof(BOOK_DIR) + LIBRARY_FILENAME_SIZE], key[16];
+        snprintf(path, sizeof(path), "%s/%s", BOOK_DIR, file);
+        if (stat(path, &info) || !S_ISREG(info.st_mode)) return app_error(error, size, "TXT file not found");
+        txt_key(key, file, &info);
+        if (!forget_book(&book, key) || unlink(path)) return app_error(error, size, "Cannot remove TXT file");
+        *changed = true;
+        return app_result("deleted");
+    }
+
+    char path[96], marker[96];
+    chapter_path(path, id, 1);
+    snprintf(marker, sizeof(marker), "%s/b_%s.del", BOOK_DIR, id);
+    bool deleting = stat(marker, &info) == 0;
+    if (!deleting && errno != ENOENT) return app_error(error, size, "Cannot check book deletion");
+    if (deleting && (!S_ISREG(info.st_mode) || chapter_exists(id, 1)))
+        return app_error(error, size, "Conflicting book deletion marker");
+    if (!strcmp(action, "delete") && !deleting) {
+        if (stat(path, &info) || !S_ISREG(info.st_mode)) return app_error(error, size, "Book not found");
+        // Hide the book in a single rename; its marker survives interrupted cleanup.
+        if (rename(path, marker)) return app_error(error, size, "Cannot remove book");
+        deleting = true;
+        *changed = true;
+    }
+    if (deleting) {
+        if (strcmp(action, "delete") && strcmp(action, "add")) return app_error(error, size, "Book is being deleted");
+        if (!forget_book(&book, id) || !clear_chapters(id) || unlink(marker))
+            return app_error(error, size, "Book deletion incomplete; retry delete");
+    }
+    if (!strcmp(action, "delete")) return app_result("deleted");
+    if (!strcmp(action, "append")) {
+        int chapter = app_number(args, "chapter", 2, 999, -1);
+        if (chapter < 2 || !chapter_exists(id, 1) || !chapter_exists(id, chapter - 1))
+            return app_error(error, size, "Previous chapter required");
+        chapter_path(path, id, chapter);
+    } else if (strcmp(action, "add")) return app_error(error, size, "Unknown library action");
+    cJSON *out = add_book(path, args, error, size);
+    if (out) *changed = true;
+    return out;
+}
+
+cJSON *library_call(const cJSON *args, char *error, size_t size)
+{
+    board_sdcard_info_t info;
+    if (board_sdcard_mount(&info) != ESP_OK) return app_error(error, size, "SD card busy or unavailable");
+    bool changed = false;
+    cJSON *out = manage_book(args, &changed, error, size);
+    esp_err_t err = board_sdcard_unmount();
+    if (changed) atomic_fetch_add(&shelf_version, 1);
+    if (err != ESP_OK) {
+        cJSON_Delete(out);
+        return app_error(error, size, "SD card unmount failed");
+    }
+    return out;
+}
+
 bool library_section_load(const library_book_t *book, uint32_t number,
                           library_section_t *section, char *error, size_t size)
 {
@@ -476,6 +631,15 @@ bool library_section_load(const library_book_t *book, uint32_t number,
     strlcpy(error, "章节不存在或已损坏", size);
     bool ok = book->local ? load_txt_section(book->name, number, section, error, size) :
                            load_pushed_section(book->name, number, section);
+    if (ok) {
+        pthread_mutex_lock(&bookmark_lock);
+        if (opened_book.local != book->local || strcmp(opened_book.name, book->name)) {
+            opened_book = *book;
+            atomic_fetch_add(&reader_version, 1);
+        }
+        section->version = atomic_load(&reader_version);
+        pthread_mutex_unlock(&bookmark_lock);
+    }
     if (board_sdcard_unmount() != ESP_OK) {
         strlcpy(error, "SD 卡卸载失败", size);
         ok = false;
@@ -491,9 +655,16 @@ bool library_save_position(const library_book_t *book, const library_section_t *
                            uint32_t offset)
 {
     if (offset >= section->length) return false;
-    if (book->local)
-        return write_mark("pr_txt_pos", section->bookmark_key, section->start + offset);
-    unsigned page = characters_before(section->text, offset) / AGENT_PAGE_CHARS + 1;
-    uint64_t position = ((uint64_t)section->number << 32) | (page << 16) | offset;
-    return write_mark("pr_read_pos", book->name, position);
+    pthread_mutex_lock(&bookmark_lock);
+    bool ok = true;
+    if (library_section_current(section)) {
+        if (book->local) ok = write_mark("pr_txt_pos", section->bookmark_key, section->start + offset);
+        else {
+            unsigned page = characters_before(section->text, offset) / AGENT_PAGE_CHARS + 1;
+            uint64_t position = ((uint64_t)section->number << 32) | (page << 16) | offset;
+            ok = write_mark("pr_read_pos", book->name, position);
+        }
+    }
+    pthread_mutex_unlock(&bookmark_lock);
+    return ok;
 }

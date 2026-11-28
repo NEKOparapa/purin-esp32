@@ -5,7 +5,7 @@
 #include "recorder.h"
 #include "recording_button.h"
 #include "audio_upload.h"
-#include "agent_client.h"
+#include "terminal_service.h"
 #include "reading_progress.h"
 #include "terminal_network.h"
 #include "terminal_pairing.h"
@@ -38,15 +38,15 @@ static void ui_task(void *arg)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Recorder initialization failed: %s", esp_err_to_name(err));
     }
-    err = agent_client_init();
-    if (err != ESP_OK) ESP_LOGE(TAG, "Agent initialization failed: %s", esp_err_to_name(err));
+    err = terminal_service_init();
+    if (err != ESP_OK) ESP_LOGE(TAG, "Terminal service initialization failed: %s", esp_err_to_name(err));
     err = audio_upload_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Upload initialization failed: %s", esp_err_to_name(err));
     }
     reading_progress_wake();
     recording_button_t boot = {0};
-    recorder_state_t last_reported = RECORDER_IDLE;
+    int last_reported = -1;
     static const char *const state_names[] = {"idle", "starting", "recording", "saving", "error"};
     ESP_LOGI(TAG, "Startup complete: home screen ready");
     for (;;) {
@@ -68,16 +68,16 @@ static void ui_task(void *arg)
             }
         }
         recorder_status_t status = recorder_get_status();
-        if (status.state != last_reported) {
-            last_reported = status.state;
+        if ((int)status.state != last_reported) {
+            last_reported = (int)status.state;
             if ((unsigned)status.state < sizeof(state_names) / sizeof(state_names[0])) {
-                agent_client_report_recorder_state(state_names[status.state]);
+                terminal_service_report_recorder_state(state_names[status.state]);
             }
         }
         if (status.state != RECORDER_RECORDING) {
             home_screen_show_upload_confirmation(false);
         }
-        home_screen_set_status(status, audio_upload_get_status().state);
+        home_screen_set_status(status.state, board_battery_percent());
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(10) > 0 ? pdMS_TO_TICKS(10) : 1);
     }

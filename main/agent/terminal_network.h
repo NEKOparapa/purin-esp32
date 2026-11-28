@@ -8,15 +8,8 @@
 #else
 #include "upload_config.example.h"
 #endif
-#if !defined(PURIN_DEVICE_TOKEN) && defined(PURIN_TERMINAL_TOKEN)
-#define PURIN_DEVICE_TOKEN PURIN_TERMINAL_TOKEN
-#endif
 #ifndef PURIN_DEVICE_ID
-#ifdef PURIN_TERMINAL_ID
-#define PURIN_DEVICE_ID PURIN_TERMINAL_ID
-#else
 #define PURIN_DEVICE_ID ""
-#endif
 #endif
 #ifndef PURIN_DEVICE_NAME
 #define PURIN_DEVICE_NAME "ESP32"

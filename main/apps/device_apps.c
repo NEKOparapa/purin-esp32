@@ -9,7 +9,7 @@
 #include <string.h>
 
 const char *const app_ids[] = {"esp_vibration", "esp_player", "esp_card", "esp_timer", "esp_library"};
-const char *const app_titles[] = {"震动器", "播放器", "提示卡片", "计时器", "阅读书库"};
+const char *const app_titles[] = {"震动器", "播放器", "提示卡片", "计时器", "书库管理"};
 static nvs_handle_t prefs;
 static SemaphoreHandle_t lock;
 static atomic_uint enabled;
@@ -17,11 +17,10 @@ static prompt_card_t card;
 static char timer_label[193];
 static int64_t deadline;
 static int timer_seconds;
+static uint32_t timer_run;
 static bool expired;
-static device_app_t focus = APP_CARD;
 static desk_notice_t notice;
-static const char *query_feedback;
-static int64_t notice_until, query_until, timer_end_until;
+static int64_t notice_until;
 static const int64_t notice_duration_us = 10 * 1000000LL;
 
 esp_err_t device_apps_init(void)
@@ -113,7 +112,10 @@ void device_apps_tick(void)
     if (ring) {
         deadline = 0;
         expired = true;
-        timer_end_until = esp_timer_get_time() + notice_duration_us;
+        if (notice.kind == DESK_TIMER) {
+            notice.kind = DESK_TIMER_END;
+            notice_until = esp_timer_get_time() + notice_duration_us;
+        }
     }
     xSemaphoreGive(lock);
     if (ring && (device_apps_mask() & (1u << APP_VIBRATION))) board_vibration_pulse(250);
@@ -123,15 +125,16 @@ void device_apps_snapshot(desk_state_t *out)
 {
     if (!lock) { memset(out, 0, sizeof(*out)); return; }
     xSemaphoreTake(lock, portMAX_DELAY);
-    int64_t now = esp_timer_get_time();
-    out->notice = now < notice_until ? notice : (desk_notice_t){0};
-    out->query_feedback = now < query_until ? query_feedback : NULL;
-    out->show_timer_end = now < timer_end_until;
-    out->focus = focus;
+    if (notice_until && esp_timer_get_time() >= notice_until) {
+        notice = (desk_notice_t){0};
+        notice_until = 0;
+    }
+    out->notice = notice;
     out->card = card;
     strlcpy(out->timer_label, timer_label, sizeof(out->timer_label));
     out->seconds_left = seconds_left();
     out->timer_seconds = timer_seconds;
+    out->timer_run = timer_run;
     out->expired = expired;
     xSemaphoreGive(lock);
 }
@@ -151,6 +154,7 @@ bool device_apps_acknowledge(const char *id)
     prompt_card_t next = card;
     next.acknowledged = true;
     bool ok = *id && !strcmp(next.id, id) && (card.acknowledged || save_card(&next));
+    if (ok && notice.kind == DESK_CARD) notice = (desk_notice_t){0};
     xSemaphoreGive(lock);
     return ok;
 }
@@ -166,8 +170,8 @@ static cJSON *card_call(const char *action, const cJSON *args, const char *id, c
         strlcpy(next.title, title, sizeof(next.title));
         strlcpy(next.body, body, sizeof(next.body));
         if (!save_card(&next)) return app_error(error, size, "Cannot save card");
-        focus = APP_CARD;
-        notice_until = query_until = timer_end_until = 0;
+        notice = (desk_notice_t){.kind = DESK_CARD, .app = APP_CARD};
+        notice_until = 0;
     } else if (strcmp(action, "status")) return app_error(error, size, "Unknown card action");
     cJSON *out = app_result(!*card.id ? "empty" : card.acknowledged ? "acknowledged" : "pending");
     if (out && *card.id) {
@@ -175,6 +179,26 @@ static cJSON *card_call(const char *action, const cJSON *args, const char *id, c
         cJSON_AddStringToObject(out, "title", card.title);
     }
     return out;
+}
+
+static void stop_timer_locked(void)
+{
+    expired = false;
+    deadline = 0;
+    timer_label[0] = 0;
+    timer_seconds = 0;
+    if (notice.kind == DESK_TIMER || notice.kind == DESK_TIMER_END) {
+        notice = (desk_notice_t){0};
+        notice_until = 0;
+    }
+}
+
+void device_apps_stop_home_timer(uint32_t displayed_run)
+{
+    if (!lock) return;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (notice.kind == DESK_TIMER && timer_run == displayed_run) stop_timer_locked();
+    xSemaphoreGive(lock);
 }
 
 static cJSON *timer_call(const char *action, const cJSON *args, char *error, size_t size)
@@ -185,14 +209,14 @@ static cJSON *timer_call(const char *action, const cJSON *args, char *error, siz
         if (seconds < 1 || (label && *label && !app_text(args, "label", 48)))
             return app_error(error, size, "Invalid timer duration or label");
         timer_seconds = seconds;
+        ++timer_run;
         deadline = esp_timer_get_time() + (int64_t)seconds * 1000000;
         expired = false;
-        focus = APP_TIMER;
-        notice_until = query_until = timer_end_until = 0;
+        notice = (desk_notice_t){.kind = DESK_TIMER, .app = APP_TIMER};
+        notice_until = 0;
         strlcpy(timer_label, label && *label ? label : "倒计时", sizeof(timer_label));
     } else if (!strcmp(action, "stop")) {
-        expired = false; deadline = timer_end_until = 0; timer_label[0] = 0;
-        timer_seconds = 0;
+        stop_timer_locked();
     } else if (strcmp(action, "status")) return app_error(error, size, "Unknown timer action");
     int remaining = seconds_left();
     cJSON *out = app_result(remaining ? "running" : (expired || deadline) ? "finished" : "idle");
@@ -226,25 +250,21 @@ static cJSON *run_action(device_app_t app, const char *action, const cJSON *args
     return out;
 }
 
-// The Agent worker publishes only the outcome. All display access stays on the UI task.
+// The terminal service publishes only the outcome. All display access stays on the UI task.
 static void report_action(device_app_t app, const char *action, const cJSON *args, const char *error)
 {
     desk_notice_t next = {.app = app};
-    const char *title = "", *book_id = "", *query = NULL;
+    const char *title = "", *book_id = "";
+    if (!strcmp(action, "status") || !strcmp(action, "list") || !strcmp(action, "read")) return;
     if (error) {
         next.kind = DESK_ERROR;
         title = !strcmp(error, "Audio is in use") ? "音频正被占用" : error;
-    } else if (!strcmp(action, "status")) {
-        static const char *const status[] = {"已查询震动器状态", "已查询播放状态", "已查询卡片状态", "已查询计时状态"};
-        if (app < APP_LIBRARY) query = status[app];
-    } else if (!strcmp(action, "list")) {
-        query = app == APP_LIBRARY ? "已查询书目" : "已查询音频列表";
-    } else if (!strcmp(action, "read")) {
-        query = "已读取书页";
-    } else if (app == APP_LIBRARY) {
+    } else if (app == APP_LIBRARY && (!strcmp(action, "add") || !strcmp(action, "append"))) {
         next.kind = !strcmp(action, "add") ? DESK_BOOK : DESK_CHAPTER;
         title = app_text(args, "title", 48);
         book_id = app_text(args, "id", 12);
+    } else if (app == APP_LIBRARY && !strcmp(action, "delete")) {
+        next.kind = DESK_BOOK_DELETED;
     } else if (!strcmp(action, "pulse")) {
         next.kind = DESK_PULSE;
     } else if (!strcmp(action, "play")) {
@@ -254,21 +274,14 @@ static void report_action(device_app_t app, const char *action, const cJSON *arg
     } else if (!strcmp(action, "stop")) {
         next.kind = DESK_STOPPED;
     }
-    if (!query && next.kind == DESK_NONE) return;
+    if (next.kind == DESK_NONE) return;
     if (next.kind == DESK_PULSE)
         snprintf(next.title, sizeof(next.title), "单次短震 %d 毫秒", app_number(args, "duration_ms", 1, 1000, 100));
     else strlcpy(next.title, title, sizeof(next.title));
     strlcpy(next.book_id, book_id, sizeof(next.book_id));
     xSemaphoreTake(lock, portMAX_DELAY);
-    int64_t until = esp_timer_get_time() + notice_duration_us;
-    if (query) {
-        query_feedback = query;
-        query_until = until;
-    } else {
-        notice = next;
-        notice_until = until;
-        query_until = 0;
-    }
+    notice = next;
+    notice_until = esp_timer_get_time() + notice_duration_us;
     xSemaphoreGive(lock);
 }
 

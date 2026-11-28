@@ -1,16 +1,16 @@
 #include "eink_ui.h"
-#include "agent_screen.h"
 #include "home_graphics.h"
 
-extern const uint8_t chat_sc_start[] asm("_binary_chat_sc_ttf_start");
-extern const uint8_t chat_sc_end[] asm("_binary_chat_sc_ttf_end");
+extern const uint8_t ui_sc_start[] asm("_binary_ui_sc_ttf_start");
+extern const uint8_t ui_sc_end[] asm("_binary_ui_sc_ttf_end");
 
 static const lv_font_t *heading_font_cache;
 static const lv_font_t *small_font_cache;
+static const lv_font_t *body_font_cache;
 
 static const lv_font_t *load_sc_font(int px)
 {
-    lv_font_t *font = lv_tiny_ttf_create_data(chat_sc_start, chat_sc_end - chat_sc_start, px);
+    lv_font_t *font = lv_tiny_ttf_create_data(ui_sc_start, ui_sc_end - ui_sc_start, px);
     if (font) font->fallback = LV_FONT_DEFAULT;
     return font ? font : LV_FONT_DEFAULT;
 }
@@ -23,7 +23,8 @@ const lv_font_t *eink_heading_font(void)
 
 const lv_font_t *eink_body_font(void)
 {
-    return agent_text_font();
+    if (!body_font_cache) body_font_cache = load_sc_font(22);
+    return body_font_cache;
 }
 
 const lv_font_t *eink_small_font(void)
@@ -110,19 +111,6 @@ static lv_obj_t *make_shape(lv_obj_t *parent, int x, int y, int w, int h, int ra
         lv_obj_set_style_border_opa(s, LV_OPA_COVER, LV_PART_MAIN);
     }
     return s;
-}
-
-lv_obj_t *eink_icon_chat(lv_obj_t *parent, bool on_dark_tile)
-{
-    lv_color_t fg, bg;
-    lv_obj_t *box = make_medallion(parent, on_dark_tile, &fg, &bg);
-    // Clean speech bubble inside 28x28 canvas
-    make_shape(box, 2, 4, 24, 18, 8, bg, fg, 2);
-    make_shape(box, 5, 20, 6, 5, 2, fg, fg, 0);
-    make_shape(box, 7, 11, 3, 3, LV_RADIUS_CIRCLE, fg, fg, 0);
-    make_shape(box, 12, 11, 3, 3, LV_RADIUS_CIRCLE, fg, fg, 0);
-    make_shape(box, 17, 11, 3, 3, LV_RADIUS_CIRCLE, fg, fg, 0);
-    return lv_obj_get_parent(box);
 }
 
 lv_obj_t *eink_icon_calendar(lv_obj_t *parent, bool on_dark_tile)
@@ -282,26 +270,18 @@ lv_obj_t *eink_outline_button(lv_obj_t *parent, const char *text, const lv_font_
     return button;
 }
 
-lv_obj_t *eink_badge(lv_obj_t *parent, const char *text, const lv_font_t *font, bool filled)
+lv_obj_t *eink_refresh_button(lv_obj_t *parent, lv_event_cb_t on_refresh)
 {
-    lv_obj_t *pill = lv_obj_create(parent);
-    lv_obj_remove_style_all(pill);
-    lv_obj_remove_flag(pill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(pill, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_radius(pill, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(pill, 12, LV_PART_MAIN);
-    lv_obj_set_style_pad_ver(pill, 4, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(pill, filled ? lv_color_black() : lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_border_color(pill, lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_border_width(pill, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_opa(pill, LV_OPA_COVER, LV_PART_MAIN);
-
-    lv_obj_t *lbl = lv_label_create(pill);
-    lv_obj_set_style_text_color(lbl, filled ? lv_color_white() : lv_color_black(), LV_PART_MAIN);
-    if (font) lv_obj_set_style_text_font(lbl, font, LV_PART_MAIN);
-    lv_label_set_text(lbl, text ? text : "");
-    return pill;
+    lv_obj_t *btn = lv_button_create(parent);
+    eink_style_clean_box(btn);
+    lv_obj_remove_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(btn, 48, 48);
+    lv_obj_set_style_translate_y(btn, 1, LV_STATE_PRESSED);
+    lv_obj_set_style_opa(btn, LV_OPA_40, LV_STATE_DISABLED);
+    lv_obj_t *icon = eink_label(btn, LV_SYMBOL_REFRESH, &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
+    lv_obj_center(icon);
+    if (on_refresh) lv_obj_add_event_cb(btn, on_refresh, LV_EVENT_CLICKED, NULL);
+    return btn;
 }
 
 lv_obj_t *eink_back_button(lv_obj_t *parent, lv_event_cb_t on_back)
@@ -404,7 +384,7 @@ lv_obj_t *eink_textarea(lv_obj_t *parent, const lv_font_t *font, int height, int
     return frame;
 }
 
-static void style_key_panel(lv_obj_t *panel, const lv_font_t *font, int pad, int key_border)
+void eink_style_keyboard(lv_obj_t *panel)
 {
     // LVGL marks function keys as checked. Give them the same ink as letter keys.
     lv_obj_remove_style_all(panel);
@@ -413,23 +393,13 @@ static void style_key_panel(lv_obj_t *panel, const lv_font_t *font, int pad, int
     lv_obj_set_style_border_color(panel, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_border_side(panel, LV_BORDER_SIDE_TOP, LV_PART_MAIN);
     lv_obj_set_style_border_width(panel, 1, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(panel, pad, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(panel, 6, LV_PART_MAIN);
     lv_obj_set_style_pad_gap(panel, 5, LV_PART_MAIN);
 
     lv_obj_set_style_border_color(panel, lv_color_black(), LV_PART_ITEMS);
-    lv_obj_set_style_border_width(panel, key_border, LV_PART_ITEMS);
+    lv_obj_set_style_border_width(panel, 2, LV_PART_ITEMS);
     lv_obj_set_style_radius(panel, 8, LV_PART_ITEMS);
     lv_obj_set_style_text_color(panel, lv_color_black(), LV_PART_ITEMS);
-    if (font) lv_obj_set_style_text_font(panel, font, LV_PART_ITEMS);
-    lv_obj_set_style_border_width(panel, key_border + 2, LV_PART_ITEMS | LV_STATE_PRESSED);
-}
-
-void eink_style_keyboard(lv_obj_t *kb)
-{
-    style_key_panel(kb, &lv_font_montserrat_20, 6, 2);
-}
-
-void eink_style_candidates(lv_obj_t *cand, const lv_font_t *font)
-{
-    style_key_panel(cand, font, 4, 0);
+    lv_obj_set_style_text_font(panel, &lv_font_montserrat_20, LV_PART_ITEMS);
+    lv_obj_set_style_border_width(panel, 4, LV_PART_ITEMS | LV_STATE_PRESSED);
 }

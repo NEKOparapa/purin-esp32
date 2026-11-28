@@ -1,6 +1,6 @@
 #include "settings_screen.h"
 #include "board.h"
-#include "device_apps_screen.h"
+#include "device_apps.h"
 #include "eink_ui.h"
 #include "esp_flash.h"
 #include "esp_system.h"
@@ -11,6 +11,7 @@
 #include "terminal_http.h"
 #include "terminal_network.h"
 #include "terminal_pairing.h"
+#include "terminal_tools.h"
 
 #include <inttypes.h>
 #include <stdatomic.h>
@@ -94,12 +95,14 @@ static lv_obj_t *network_scr;
 static lv_obj_t *wifi_scan_scr;
 static lv_obj_t *wifi_password_scr;
 static lv_obj_t *connectors_scr;
+static lv_obj_t *connector_switches[APP_COUNT], *connector_note;
 static lv_obj_t *appearance_scr;
 static lv_obj_t *collection_scr;
 static lv_obj_t *storage_scr;
 
 static lv_obj_t *idx_network_val;
 static lv_obj_t *idx_rec_val;
+static lv_obj_t *idx_connectors_val;
 static lv_obj_t *network_status_val;
 static lv_obj_t *wifi_name_val;
 static lv_obj_t *wifi_scan_button;
@@ -175,6 +178,28 @@ static void publish_qr_live_status(const char *status)
     xSemaphoreGive(qr_preview_lock);
 }
 
+static const char *camera_start_error(board_camera_stage_t stage, esp_err_t err)
+{
+    if (err == ESP_ERR_NO_MEM) return "内存不足，请点重试。";
+    switch (stage) {
+    case BOARD_CAMERA_POWER:
+        if (err == ESP_ERR_NOT_FOUND) return "摄像头未连接，供电芯片也未响应。请点重试。";
+        return "摄像头供电设置失败，请点重试。";
+    case BOARD_CAMERA_USB_MUX:
+        return "切换摄像头 USB 通路失败，请点重试。";
+    case BOARD_CAMERA_USB_HOST:
+        return "USB 主机启动失败，请点重试。";
+    case BOARD_CAMERA_DETECT:
+        if (err == ESP_ERR_NOT_SUPPORTED) return "已发现 USB 设备，未识别到 UVC 摄像头。";
+        if (err == ESP_ERR_INVALID_STATE) return "未检测到摄像头，供电芯片未进入 OTG 模式。请用电池供电后重试。";
+        return "USB 未检测到摄像头。请检查摄像头连接，或改用链接配对。";
+    case BOARD_CAMERA_STREAM:
+        return "已检测到摄像头，视频流启动失败。请点重试。";
+    default:
+        return "摄像头启动失败，请点重试。";
+    }
+}
+
 static void run_qr_pair(set_res_t *res)
 {
     qr_scanner_handle_t scanner = qr_scanner_create();
@@ -192,7 +217,8 @@ static void run_qr_pair(set_res_t *res)
         return;
     }
 
-    esp_err_t cam_err = board_camera_open();
+    board_camera_stage_t stage;
+    esp_err_t cam_err = board_camera_open_with_status(&stage);
     if (cam_err != ESP_OK) {
         free(preview_tmp);
         qr_scanner_destroy(scanner);
@@ -200,15 +226,7 @@ static void run_qr_pair(set_res_t *res)
             res->canceled = true;
             return;
         }
-        if (cam_err == ESP_ERR_TIMEOUT) {
-            strlcpy(res->error, "未检测到板载摄像头，请点重试或改用链接配对。", sizeof(res->error));
-        } else if (cam_err == ESP_ERR_NOT_FOUND) {
-            strlcpy(res->error, "摄像头视频流初始化失败，请点重试。", sizeof(res->error));
-        } else if (cam_err == ESP_ERR_NO_MEM) {
-            strlcpy(res->error, "内存不足，请点重试。", sizeof(res->error));
-        } else {
-            strlcpy(res->error, "摄像头启动失败，请点重试。", sizeof(res->error));
-        }
+        strlcpy(res->error, camera_start_error(stage, cam_err), sizeof(res->error));
         return;
     }
 
@@ -283,7 +301,7 @@ static void run_qr_pair(set_res_t *res)
         return;
     }
     if (!res->error[0]) {
-        strlcpy(res->error, "扫码超时，请点右上角「重试」继续扫码。", sizeof(res->error));
+        strlcpy(res->error, "扫码超时，点右上角的刷新图标重新扫码。", sizeof(res->error));
     }
 }
 
@@ -495,8 +513,7 @@ static lv_obj_t *make_collection_note(lv_obj_t *parent, const char *text)
     return label;
 }
 
-static lv_obj_t *make_category_row(lv_obj_t *parent, const char *title, const char *right_text,
-                                   lv_obj_t **val_out, lv_event_cb_t on_click)
+static lv_obj_t *make_navigation_row(lv_obj_t *parent)
 {
     lv_obj_t *row = lv_button_create(parent);
     lv_obj_remove_style_all(row);
@@ -515,21 +532,6 @@ static lv_obj_t *make_category_row(lv_obj_t *parent, const char *title, const ch
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(row, 12, LV_PART_MAIN);
 
-    lv_obj_t *lbl = lv_label_create(row);
-    lv_obj_set_flex_grow(lbl, 1);
-    lv_obj_set_style_text_font(lbl, eink_body_font(), LV_PART_MAIN);
-    lv_label_set_text(lbl, title);
-
-    lv_obj_t *val = lv_label_create(row);
-    lv_obj_set_style_text_font(val, eink_small_font(), LV_PART_MAIN);
-    lv_label_set_text(val, right_text ? right_text : "");
-    if (val_out) *val_out = val;
-
-    lv_obj_t *chev = lv_label_create(row);
-    lv_obj_set_style_text_font(chev, &lv_font_montserrat_20, LV_PART_MAIN);
-    lv_label_set_text(chev, LV_SYMBOL_RIGHT);
-
-    if (on_click) lv_obj_add_event_cb(row, on_click, LV_EVENT_CLICKED, NULL);
     return row;
 }
 
@@ -743,9 +745,7 @@ static lv_obj_t *create_subpage_shell(const char *title, lv_obj_t **body_out,
     eink_top_bar_font(scr, title, eink_heading_font(), on_back,
                       on_refresh ? &right_slot : NULL);
     if (on_refresh && right_slot) {
-        lv_obj_t *btn =
-            eink_outline_button(right_slot, "刷新", eink_small_font(), 40, on_refresh, NULL);
-        lv_obj_set_style_pad_hor(btn, 14, LV_PART_MAIN);
+        eink_refresh_button(right_slot, on_refresh);
     }
 
     lv_obj_t *body = lv_obj_create(scr);
@@ -907,7 +907,6 @@ static void open_wifi_password(void)
         lv_obj_set_width(wifi_password_status, LV_PCT(100));
         lv_obj_add_event_cb(wifi_password, wifi_password_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-        // Use a private keyboard mode so the chat keyboard's layout stays independent.
         static const char *const symbols[] = {
             "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", LV_SYMBOL_BACKSPACE, "\n",
             "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "_", "-", "\n",
@@ -971,8 +970,12 @@ static void render_wifi_scan(const set_res_t *res)
         ssid_label(name, wifi_aps[i].ssid);
         char details[32];
         snprintf(details, sizeof(details), "%s %d dBm", wifi_aps[i].secured ? "加密" : "开放", wifi_aps[i].rssi);
-        lv_obj_t *row = make_category_row(wifi_scan_list, name, details, NULL, NULL);
-        lv_label_set_long_mode(lv_obj_get_child(row, 0), LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_t *row = make_navigation_row(wifi_scan_list);
+        lv_obj_t *ssid = eink_label(row, name, eink_body_font(), LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_flex_grow(ssid, 1);
+        lv_label_set_long_mode(ssid, LV_LABEL_LONG_MODE_DOTS);
+        eink_label(row, details, eink_small_font(), LV_TEXT_ALIGN_RIGHT);
+        eink_label(row, LV_SYMBOL_RIGHT, &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
         lv_obj_add_event_cb(row, wifi_ap_clicked, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
         if (i + 1 < res->ap_count) add_inset_divider(wifi_scan_list);
     }
@@ -1087,7 +1090,7 @@ static void start_qr_pair_scan(void)
         if (qr_retry_button) lv_obj_add_state(qr_retry_button, LV_STATE_DISABLED);
         lv_label_set_text(qr_pair_status, "正在启动摄像头…");
     } else {
-        lv_label_set_text(qr_pair_status, "设备正忙，请稍后点「重试」。");
+        lv_label_set_text(qr_pair_status, "设备正忙，请稍后点刷新图标重新扫码。");
         if (qr_retry_button) lv_obj_remove_state(qr_retry_button, LV_STATE_DISABLED);
     }
 }
@@ -1119,9 +1122,7 @@ static void open_qr_pair_page(lv_event_t *event)
         lv_obj_t *right_slot = NULL;
         eink_top_bar_font(qr_pair_scr, "扫码配对", eink_heading_font(), back_from_qr_pair, &right_slot);
         if (right_slot) {
-            qr_retry_button = eink_outline_button(right_slot, "重试", eink_small_font(), 40,
-                                                  retry_qr_pair_clicked, NULL);
-            lv_obj_set_style_pad_hor(qr_retry_button, 14, LV_PART_MAIN);
+            qr_retry_button = eink_refresh_button(right_slot, retry_qr_pair_clicked);
         }
 
         lv_obj_t *body = lv_obj_create(qr_pair_scr);
@@ -1426,9 +1427,28 @@ static void open_network_page(lv_event_t *event)
     lv_screen_load(network_scr);
 }
 
-static void open_device_app(lv_event_t *event)
+static lv_obj_t *make_settings_switch(lv_obj_t *parent)
 {
-    device_app_open((device_app_t)(uintptr_t)lv_event_get_user_data(event), connectors_scr);
+    lv_obj_t *toggle = lv_switch_create(parent);
+    lv_obj_set_size(toggle, 68, 36);
+    lv_obj_set_style_anim_duration(toggle, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(toggle, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(toggle, LV_OPA_COVER, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    return toggle;
+}
+
+static void change_connector(lv_event_t *event)
+{
+    if (lv_event_get_target_obj(event) != lv_event_get_current_target_obj(event)) return;
+    device_app_t app = (device_app_t)(uintptr_t)lv_event_get_user_data(event);
+    esp_err_t err = device_apps_toggle(app);
+    bool enabled = (device_apps_mask() & (1u << app)) != 0;
+    lv_obj_set_state(connector_switches[app], LV_STATE_CHECKED, enabled);
+    const char *message = "";
+    if (err != ESP_OK) message = "开关保存失败，请重试";
+    else if (enabled && !terminal_tools_enabled()) message = "远程调用需配置 HTTPS 服务与设备凭据";
+    lv_label_set_text_static(connector_note, message);
+    lv_obj_set_flag(connector_note, LV_OBJ_FLAG_HIDDEN, !*message);
 }
 
 static void open_connectors_page(lv_event_t *event)
@@ -1437,11 +1457,24 @@ static void open_connectors_page(lv_event_t *event)
     if (!connectors_scr) {
         lv_obj_t *body = NULL;
         connectors_scr = create_subpage_shell("连接器", &body, back_to_index, NULL);
+        lv_obj_t *group = make_settings_card(body);
         for (unsigned i = 0; i < APP_COUNT; ++i) {
-            lv_obj_t *row = make_category_row(body, app_titles[i], "", NULL, NULL);
-            lv_obj_add_event_cb(row, open_device_app, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+            if (i) add_inset_divider(group);
+            lv_obj_t *row = make_info_row(group, app_titles[i], NULL, NULL);
+            lv_obj_set_height(row, 80);
+            lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(row, change_connector, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+            lv_obj_t *toggle = make_settings_switch(row);
+            connector_switches[i] = toggle;
+            lv_obj_add_event_cb(toggle, change_connector, LV_EVENT_VALUE_CHANGED, (void *)(uintptr_t)i);
         }
+        connector_note = eink_label(body, "", eink_small_font(), LV_TEXT_ALIGN_LEFT);
+        lv_obj_set_width(connector_note, LV_PCT(100));
     }
+    unsigned mask = device_apps_mask();
+    for (unsigned i = 0; i < APP_COUNT; ++i)
+        lv_obj_set_state(connector_switches[i], LV_STATE_CHECKED, (mask & (1u << i)) != 0);
+    lv_obj_add_flag(connector_note, LV_OBJ_FLAG_HIDDEN);
     lv_screen_load(connectors_scr);
 }
 
@@ -1450,7 +1483,7 @@ static void open_appearance_page(lv_event_t *event)
     (void)event;
     if (!appearance_scr) {
         lv_obj_t *body = NULL;
-        appearance_scr = create_subpage_shell("外观", &body, back_to_index, NULL);
+        appearance_scr = create_subpage_shell("外观", &body, back_to_index, trigger_full_refresh);
 
         lv_obj_t *group = make_settings_card(body);
 
@@ -1459,10 +1492,6 @@ static void open_appearance_page(lv_event_t *event)
         make_info_row(group, "色彩模式", "1-bit 黑白纸感", NULL);
         add_inset_divider(group);
         make_info_row(group, "刷新策略", "局刷 / 10 帧全刷", NULL);
-
-        lv_obj_t *refresh_btn = eink_outline_button(body, "全刷屏幕（清除残影）", eink_body_font(), 56,
-                                                   trigger_full_refresh, NULL);
-        lv_obj_set_width(refresh_btn, LV_PCT(100));
     }
     lv_screen_load(appearance_scr);
 }
@@ -1509,6 +1538,29 @@ static void select_recording_upload(lv_event_t *event)
     lv_label_set_text(recording_upload_note, recording_upload_hint);
 }
 
+static lv_obj_t *recording_upload_option(lv_obj_t *parent, const char *label, bool automatic)
+{
+    lv_obj_t *option = lv_checkbox_create(parent);
+    eink_style_clean_box(option);
+    // Apply selection only after the mutually exclusive preference has been saved.
+    lv_obj_remove_flag(option, LV_OBJ_FLAG_CHECKABLE);
+    lv_checkbox_set_text_static(option, label);
+    lv_obj_set_style_text_font(option, eink_small_font(), 0);
+    lv_obj_set_style_text_color(option, lv_color_black(), 0);
+    lv_obj_set_style_pad_ver(option, 9, 0);
+    lv_obj_set_style_pad_hor(option, 4, 0);
+    lv_obj_set_style_pad_column(option, 4, 0);
+    lv_obj_set_style_transform_width(option, -4, LV_PART_INDICATOR);
+    lv_obj_set_style_transform_height(option, -4, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(option, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+    lv_obj_set_style_border_width(option, 2, LV_PART_INDICATOR);
+    lv_obj_set_style_border_color(option, lv_color_black(), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(option, LV_OPA_COVER, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(option, lv_color_black(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(option, select_recording_upload, LV_EVENT_CLICKED, (void *)(uintptr_t)automatic);
+    return option;
+}
+
 static void toggle_reading_upload(lv_event_t *event)
 {
     lv_obj_t *toggle = lv_event_get_target_obj(event);
@@ -1541,10 +1593,8 @@ static void open_collection_page(lv_event_t *event)
         lv_obj_set_size(choices, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
         lv_obj_set_flex_flow(choices, LV_FLEX_FLOW_ROW);
         lv_obj_set_style_pad_column(choices, 8, LV_PART_MAIN);
-        recording_manual_button = eink_pill_button(choices, "手动上传", eink_small_font(), 44,
-                                                    false, select_recording_upload, NULL);
-        recording_auto_button = eink_pill_button(choices, "自动上传", eink_small_font(), 44,
-                                                  false, select_recording_upload, (void *)(uintptr_t)1);
+        recording_manual_button = recording_upload_option(choices, "手动上传", false);
+        recording_auto_button = recording_upload_option(choices, "自动上传", true);
         refresh_recording_upload_mode();
         recording_upload_note = make_collection_note(recording, recording_upload_hint);
 
@@ -1558,9 +1608,7 @@ static void open_collection_page(lv_event_t *event)
         eink_label(body, "阅读采集", eink_body_font(), LV_TEXT_ALIGN_LEFT);
         lv_obj_t *reading = make_settings_card(body);
         lv_obj_t *progress = make_info_row(reading, "阅读进度上传", NULL, NULL);
-        lv_obj_t *toggle = lv_switch_create(progress);
-        lv_obj_set_size(toggle, 68, 36);
-        lv_obj_set_style_anim_duration(toggle, 0, LV_PART_MAIN);
+        lv_obj_t *toggle = make_settings_switch(progress);
         lv_obj_set_state(toggle, LV_STATE_CHECKED, reading_progress_upload);
         lv_obj_add_event_cb(toggle, toggle_reading_upload, LV_EVENT_VALUE_CHANGED, NULL);
         reading_upload_note = make_collection_note(reading, reading_upload_hint);
@@ -1602,6 +1650,41 @@ static void open_storage_page(lv_event_t *event)
     refresh_storage_clicked(NULL);
 }
 
+static lv_obj_t *index_section(lv_obj_t *parent, const char *title)
+{
+    lv_obj_t *heading = eink_label(parent, title, eink_small_font(), LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_style_pad_left(heading, 12, 0);
+    lv_obj_t *group = make_settings_card(parent);
+    lv_obj_set_style_border_width(group, 1, 0);
+    lv_obj_set_style_pad_all(group, 3, 0);
+    lv_obj_set_style_margin_bottom(group, 8, 0);
+    return group;
+}
+
+static lv_obj_t *index_entry(lv_obj_t *group, const char *symbol, const char *title,
+                             const char *summary, lv_event_cb_t open)
+{
+    if (lv_obj_get_child_count(group)) add_inset_divider(group);
+    lv_obj_t *row = make_navigation_row(group);
+    lv_obj_set_height(row, 84);
+    lv_obj_set_style_pad_column(row, 16, 0);
+    lv_obj_t *icon = eink_label(row, symbol, &lv_font_montserrat_28, LV_TEXT_ALIGN_CENTER);
+    lv_obj_set_width(icon, 36);
+
+    lv_obj_t *copy = lv_obj_create(row);
+    eink_style_clean_box(copy);
+    lv_obj_remove_flag(copy, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_height(copy, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(copy, 1);
+    lv_obj_set_flex_flow(copy, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(copy, 3, 0);
+    eink_label(copy, title, eink_body_font(), LV_TEXT_ALIGN_LEFT);
+    lv_obj_t *detail = eink_label(copy, summary, eink_small_font(), LV_TEXT_ALIGN_LEFT);
+    eink_label(row, LV_SYMBOL_RIGHT, &lv_font_montserrat_20, LV_TEXT_ALIGN_CENTER);
+    lv_obj_add_event_cb(row, open, LV_EVENT_CLICKED, NULL);
+    return detail;
+}
+
 static void create_index_screen(void)
 {
     index_scr = lv_obj_create(NULL);
@@ -1619,21 +1702,21 @@ static void create_index_screen(void)
     lv_obj_set_style_pad_all(body, EINK_PAD_X, LV_PART_MAIN);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
 
-    lv_obj_t *group = make_settings_card(body);
-    // Keep the pressed row's outline clear of the surrounding card border.
-    lv_obj_set_style_pad_all(group, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(body, 16, 0);
+    lv_obj_set_style_pad_row(body, 10, 0);
 
-    make_category_row(group, "设备配对", "", NULL, open_connection_page);
-    add_inset_divider(group);
-    make_category_row(group, "网络", "", &idx_network_val, open_network_page);
-    add_inset_divider(group);
-    make_category_row(group, "连接器", "5 项应用", NULL, open_connectors_page);
-    add_inset_divider(group);
-    make_category_row(group, "外观", "墨水屏", NULL, open_appearance_page);
-    add_inset_divider(group);
-    make_category_row(group, "存储", "", NULL, open_storage_page);
-    add_inset_divider(group);
-    make_category_row(group, "信息采集", "就绪", &idx_rec_val, open_collection_page);
+    lv_obj_t *device = index_section(body, "设备与采集");
+    index_entry(device, LV_SYMBOL_USB, "设备配对",
+                has_backend_credentials() ? "已配对" : "尚未配对", open_connection_page);
+    idx_network_val = index_entry(device, LV_SYMBOL_WIFI, "网络", "", open_network_page);
+    idx_rec_val = index_entry(device, LV_SYMBOL_UPLOAD, "信息采集", "", open_collection_page);
+
+    lv_obj_t *extensions = index_section(body, "能力扩展");
+    idx_connectors_val = index_entry(extensions, LV_SYMBOL_SHUFFLE, "连接器", "", open_connectors_page);
+
+    lv_obj_t *general = index_section(body, "通用");
+    index_entry(general, LV_SYMBOL_EYE_OPEN, "外观", "墨水屏与刷新", open_appearance_page);
+    index_entry(general, LV_SYMBOL_SD_CARD, "存储", "内置闪存与 SD 卡", open_storage_page);
 }
 
 void settings_screen_refresh_state(void)
@@ -1641,7 +1724,12 @@ void settings_screen_refresh_state(void)
     const char *rec = recorder_label_zh();
 
     refresh_network_state();
-    if (idx_rec_val) lv_label_set_text(idx_rec_val, rec);
+    if (idx_rec_val) lv_label_set_text_fmt(idx_rec_val, "录音状态  %s", rec);
+    if (idx_connectors_val) {
+        unsigned mask = device_apps_mask(), enabled = 0;
+        for (unsigned i = 0; i < APP_COUNT; ++i) enabled += (mask >> i) & 1u;
+        lv_label_set_text_fmt(idx_connectors_val, "已开启 %u / %u 项", enabled, (unsigned)APP_COUNT);
+    }
     if (rec_status_val) lv_label_set_text(rec_status_val, rec);
 }
 

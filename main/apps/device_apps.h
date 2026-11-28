@@ -13,7 +13,8 @@ typedef struct {
     bool acknowledged;
 } prompt_card_t;
 typedef enum {
-    DESK_NONE, DESK_PULSE, DESK_BOOK, DESK_CHAPTER, DESK_PLAYBACK, DESK_STOPPED, DESK_ERROR
+    DESK_NONE, DESK_CARD, DESK_TIMER, DESK_TIMER_END, DESK_PULSE,
+    DESK_BOOK, DESK_CHAPTER, DESK_BOOK_DELETED, DESK_PLAYBACK, DESK_STOPPED, DESK_ERROR
 } desk_notice_kind_t;
 typedef struct {
     desk_notice_kind_t kind;
@@ -24,11 +25,9 @@ typedef struct {
 typedef struct {
     prompt_card_t card;
     desk_notice_t notice;
-    device_app_t focus;
-    const char *query_feedback;
-    bool show_timer_end;
     char timer_label[193];
     int seconds_left, timer_seconds;
+    uint32_t timer_run;
     bool expired;
 } desk_state_t;
 
@@ -37,6 +36,7 @@ unsigned device_apps_mask(void);
 esp_err_t device_apps_toggle(device_app_t app);
 void device_apps_snapshot(desk_state_t *out);
 bool device_apps_acknowledge(const char *id);
+void device_apps_stop_home_timer(uint32_t displayed_run);
 void device_apps_tick(void);
 cJSON *device_apps_call(device_app_t app, const cJSON *args, const char *call_id,
                         char *error, size_t size);

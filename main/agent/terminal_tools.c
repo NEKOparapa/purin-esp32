@@ -19,20 +19,12 @@
 
 typedef struct {
     uint8_t binding[32];
-    char id[80];
-    char claim_token[80];
-    char output[256];
-    bool success;
-} legacy_receipt_t;
-
-typedef struct {
-    uint8_t binding[32];
     char id[80], claim_token[80];
     bool success;
-    char output[2048];
+    char output[2304]; // Four 255-byte TXT filenames and display titles, plus the JSON envelope.
 } status_receipt_t;
 
-static status_receipt_t receipt; // Only the Agent worker accesses the receipt.
+static status_receipt_t receipt; // Only the terminal service accesses the receipt.
 static unsigned registered, catalog_enabled;
 static bool withdrew;
 
@@ -164,30 +156,13 @@ bool terminal_tools_poll(nvs_handle_t journal)
         mbedtls_sha256((const uint8_t *)identity, (size_t)length + 1, binding, 0) != 0) return false;
     size_t size = sizeof(receipt);
     esp_err_t rc = nvs_get_blob(journal, "app_receipt", &receipt, &size);
-    const char *key = "app_receipt";
-    if (rc == ESP_ERR_NVS_NOT_FOUND) {
-        // Drain a device_status receipt written by the previous firmware before taking more work.
-        legacy_receipt_t old;
-        size = sizeof(old);
-        rc = nvs_get_blob(journal, "tool_receipt", &old, &size);
-        if (rc == ESP_OK && size == sizeof(old)) {
-            memcpy(receipt.binding, old.binding, sizeof(receipt.binding));
-            memcpy(receipt.id, old.id, sizeof(receipt.id));
-            memcpy(receipt.claim_token, old.claim_token, sizeof(receipt.claim_token));
-            old.output[sizeof(old.output)-1] = 0;
-            strlcpy(receipt.output, old.output, sizeof(receipt.output));
-            receipt.success = old.success;
-            key = "tool_receipt";
-        } else if (rc == ESP_OK) return false;
-    } else if (rc == ESP_OK &&
-               (size <= offsetof(status_receipt_t, output) ||
-                receipt.output[size - offsetof(status_receipt_t, output) - 1])) return false;
+    if (rc == ESP_OK && (size <= offsetof(status_receipt_t, output) ||
+                         receipt.output[size - offsetof(status_receipt_t, output) - 1])) return false;
     if (rc != ESP_OK && rc != ESP_ERR_NVS_NOT_FOUND) return false;
     bool pending = rc == ESP_OK;
     if (pending && memcmp(receipt.binding, binding, sizeof(binding))) {
-        if (nvs_erase_key(journal, key) != ESP_OK || nvs_commit(journal) != ESP_OK) return false;
+        if (nvs_erase_key(journal, "app_receipt") != ESP_OK || nvs_commit(journal) != ESP_OK) return false;
         pending = false;
-        key = "app_receipt";
     }
     unsigned mask = device_apps_mask();
     if (!pending && !mask && !PURIN_DEVICE_STATUS_ENABLED && withdrew &&
@@ -217,7 +192,7 @@ bool terminal_tools_poll(nvs_handle_t journal)
     }
     if (pending && deliver(&receipt)) {
         touched = true;
-        if (nvs_erase_key(journal, key) == ESP_OK) nvs_commit(journal);
+        if (nvs_erase_key(journal, "app_receipt") == ESP_OK) nvs_commit(journal);
     }
     terminal_network_release();
     return touched;

@@ -3,6 +3,7 @@
 #include "board_config.h"
 #include "board_internal.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include "esp_check.h"
@@ -48,6 +49,8 @@ enum {
     REG_STATUS1 = 0x1E,
     REG_PART_INFO = 0x38,
     REG_UNLOCK = 0x70,
+    VBUS_STAT_MASK = 0x07,
+    VBUS_STAT_OTG = 7,
     OTG_TARGET_MV = 5040,
     OTG_TARGET_MA = 1000,
     CHG_I2C_TIMEOUT_MS = 100,
@@ -61,16 +64,14 @@ static TaskHandle_t usb_lib_task;
 static uvc_host_stream_hdl_t active_stream;
 static i2c_master_dev_handle_t charger_dev;
 
-static bool charger_probed;
-static bool charger_ready;
-static bool saved_chg_enabled = true;
+static bool saved_chg_enabled;
 static bool otg_held;
 static bool mux_held;
 static bool host_installed;
+static bool root_port_powered;
 static bool uvc_installed;
 static bool session_open;
-static volatile bool usb_lib_running;
-static volatile bool uvc_connected;
+static atomic_bool uvc_connected;
 static volatile uint8_t conn_dev_addr;
 static volatile uint8_t conn_stream_idx;
 static unsigned warmup_remaining;
@@ -117,10 +118,6 @@ static void chg_unlock_private(bool enable)
 // 40s I2C watchdog (otherwise WDT resets EN_OTG mid-scan), and apply vendor boost trim.
 static esp_err_t charger_hw_init(void)
 {
-    uint8_t ctrl1 = 0;
-    if (chg_read(REG_CHG_CTRL1, &ctrl1) == ESP_OK) {
-        saved_chg_enabled = ((ctrl1 >> 5) & 0x01) != 0;
-    }
     esp_err_t err = chg_update_bits(REG_CHG_TMR, 0x01, 6, 0); // EN_AUTO_INDET = 0 (dis_dpdm)
     if (err == ESP_OK) err = chg_update_bits(REG_CHG_CTRL1, 0x01, 4, 0); // EN_HIZ = 0
     if (err == ESP_OK) err = chg_update_bits(REG_CHG_CTRL1, 0x03, 0, 0); // WDT = disabled
@@ -140,43 +137,47 @@ static esp_err_t charger_hw_init(void)
     return ESP_OK;
 }
 
-static bool ensure_charger(void)
+static esp_err_t ensure_charger(void)
 {
-    if (charger_probed) return charger_ready;
-    charger_probed = true;
+    if (charger_dev) return ESP_OK;
     i2c_master_bus_handle_t bus = board_i2c_bus();
-    if (!bus || i2c_master_probe(bus, BOARD_CHARGER_I2C_ADDRESS, CHG_I2C_TIMEOUT_MS) != ESP_OK) {
-        ESP_LOGI(TAG, "CX25601N not detected at 0x%02x; proceeding without OTG boost",
+    if (!bus) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = i2c_master_probe(bus, BOARD_CHARGER_I2C_ADDRESS, CHG_I2C_TIMEOUT_MS);
+    if (err == ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "CX25601N not detected at 0x%02x; trying camera without OTG boost",
                  BOARD_CHARGER_I2C_ADDRESS);
-        return false;
+        return ESP_OK;
     }
+    if (err != ESP_OK) return err;
     const i2c_device_config_t cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = BOARD_CHARGER_I2C_ADDRESS,
         .scl_speed_hz = BOARD_CHARGER_I2C_HZ,
     };
     uint8_t part = 0;
-    if (i2c_master_bus_add_device(bus, &cfg, &charger_dev) != ESP_OK ||
-        chg_read(REG_PART_INFO, &part) != ESP_OK ||
-        charger_hw_init() != ESP_OK) {
-        if (charger_dev) {
-            i2c_master_bus_rm_device(charger_dev);
-            charger_dev = NULL;
-        }
-        return false;
+    err = i2c_master_bus_add_device(bus, &cfg, &charger_dev);
+    if (err != ESP_OK) return err;
+    err = chg_read(REG_PART_INFO, &part);
+    if (err == ESP_OK) err = charger_hw_init();
+    if (err != ESP_OK) {
+        i2c_master_bus_rm_device(charger_dev);
+        charger_dev = NULL;
+        return err;
     }
     ESP_LOGI(TAG, "CX25601N ready at 0x%02x (part=0x%02x)", BOARD_CHARGER_I2C_ADDRESS, part);
-    charger_ready = true;
-    return true;
+    return ESP_OK;
 }
 
 static esp_err_t charger_set_otg(bool enable)
 {
-    if (!ensure_charger()) return ESP_OK;
     if (enable) {
+        ESP_RETURN_ON_ERROR(ensure_charger(), TAG, "probe camera power supply");
+        if (!charger_dev) return ESP_OK;
         uint8_t ctrl1 = 0;
-        if (chg_read(REG_CHG_CTRL1, &ctrl1) == ESP_OK) {
+        if (!otg_held) {
+            ESP_RETURN_ON_ERROR(chg_read(REG_CHG_CTRL1, &ctrl1), TAG, "read charging state");
             saved_chg_enabled = ((ctrl1 >> 5) & 0x01) != 0;
+            otg_held = true; // Restore EN_CHG even if a later register write fails.
         }
         const uint32_t votg_code = OTG_TARGET_MV / 80; // 0x3F -> 5.04 V
         const uint32_t iotg_code = OTG_TARGET_MA / 20; // 0x32 -> 1.00 A
@@ -192,7 +193,7 @@ static esp_err_t charger_set_otg(bool enable)
             vTaskDelay(pdMS_TO_TICKS(OTG_ENTRY_DELAY_MS));
             uint8_t st1 = 0;
             if (chg_read(REG_STATUS1, &st1) == ESP_OK) {
-                ESP_LOGI(TAG, "CX25601N OTG ON (STATUS1=0x%02x, VBUS_STAT=%u)", st1, st1 & 0x07);
+                ESP_LOGI(TAG, "CX25601N boost requested (STATUS1=0x%02x, VBUS_STAT=%u)", st1, st1 & VBUS_STAT_MASK);
             }
         }
         return err;
@@ -200,6 +201,7 @@ static esp_err_t charger_set_otg(bool enable)
     esp_err_t err = chg_update_bits(REG_CHG_CTRL3, 0x01, 6, 0); // EN_OTG = 0
     if (err == ESP_OK) err = chg_update_bits(REG_CHG_CTRL1, 0x01, 4, 0);
     if (err == ESP_OK) err = chg_update_bits(REG_CHG_CTRL1, 0x01, 5, saved_chg_enabled ? 1 : 0);
+    if (err == ESP_OK) otg_held = false;
     return err;
 }
 
@@ -259,7 +261,7 @@ static esp_err_t install_usb_host_on_core1(const usb_host_config_t *cfg)
 static void usb_lib_daemon(void *unused)
 {
     (void)unused;
-    while (usb_lib_running) {
+    for (;;) {
         uint32_t flags = 0;
         if (usb_host_lib_handle_events(pdMS_TO_TICKS(200), &flags) == ESP_OK) {
             if (flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
@@ -273,8 +275,6 @@ static void usb_lib_daemon(void *unused)
             }
         }
     }
-    usb_lib_task = NULL;
-    vTaskDelete(NULL);
 }
 
 static bool uvc_frame_cb(const uvc_host_frame_t *frame, void *user_ctx)
@@ -312,58 +312,62 @@ static void drain_frame_queue(uvc_host_stream_hdl_t stream)
     }
 }
 
-static void close_stream_if_any(void)
+static esp_err_t close_stream_if_any(void)
 {
-    if (!active_stream) return;
+    if (!active_stream) return ESP_OK;
     drain_frame_queue(active_stream);
     (void)uvc_host_stream_stop(active_stream);
     drain_frame_queue(active_stream);
-    (void)uvc_host_stream_close(active_stream);
+    ESP_RETURN_ON_ERROR(uvc_host_stream_close(active_stream), TAG, "close UVC stream");
     active_stream = NULL;
+    return ESP_OK;
 }
 
 // Strict hardware teardown sequence from Metalio-E-INK4:
-// 1) Close stream -> 2) Switch USB mux to debug/flash -> 3) Wait UVC disconnect -> 4) Uninstall UVC.
-static void close_camera_unlocked(void)
+// Close the stream and disconnect the physical port before freeing the UVC client.
+static esp_err_t release_camera_usb(void)
 {
-    close_stream_if_any();
+    esp_err_t err = close_stream_if_any();
+    if (err != ESP_OK) return err;
 
     if (mux_held) {
-        (void)board_set_usb_camera_mux(false);
+        ESP_RETURN_ON_ERROR(board_set_usb_camera_mux(false), TAG, "restore flash mux");
         vTaskDelay(pdMS_TO_TICKS(MUX_SETTLE_MS));
         mux_held = false;
     }
 
-    if (uvc_connected || uvc_installed) {
-        TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(DISCONNECT_WAIT_MS);
-        while (uvc_connected && xTaskGetTickCount() < deadline) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-        vTaskDelay(pdMS_TO_TICKS(HUB_SETTLE_MS));
+    if (!uvc_installed) return ESP_OK;
+    // A closed stream no longer receives UVC disconnect callbacks.
+    usb_host_lib_info_t info;
+    TickType_t started = xTaskGetTickCount();
+    for (;;) {
+        ESP_RETURN_ON_ERROR(usb_host_lib_info(&info), TAG, "USB device count");
+        if (!info.num_devices) break;
+        if (xTaskGetTickCount() - started >= pdMS_TO_TICKS(DISCONNECT_WAIT_MS)) return ESP_ERR_TIMEOUT;
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
+    vTaskDelay(pdMS_TO_TICKS(HUB_SETTLE_MS));
 
-    if (all_free_sem) {
-        while (xSemaphoreTake(all_free_sem, 0) == pdTRUE) {}
-    }
+    while (xSemaphoreTake(all_free_sem, 0) == pdTRUE) {}
+    ESP_RETURN_ON_ERROR(uvc_host_uninstall(), TAG, "uninstall UVC");
+    uvc_installed = false;
+    (void)xSemaphoreTake(all_free_sem, pdMS_TO_TICKS(ALL_FREE_WAIT_MS));
+    return ESP_OK;
+}
 
-    if (uvc_installed) {
-        (void)uvc_host_uninstall();
-        uvc_installed = false;
-        if (all_free_sem && host_installed) {
-            (void)xSemaphoreTake(all_free_sem, pdMS_TO_TICKS(ALL_FREE_WAIT_MS));
-        }
-    }
-
+static esp_err_t close_camera_unlocked(void)
+{
+    esp_err_t err = release_camera_usb();
     if (otg_held) {
         vTaskDelay(pdMS_TO_TICKS(OTG_OFF_SETTLE_MS));
-        (void)charger_set_otg(false);
-        otg_held = false;
+        esp_err_t power_err = charger_set_otg(false);
+        if (err == ESP_OK) err = power_err;
     }
 
     uvc_connected = false;
-    conn_dev_addr = 0;
-    conn_stream_idx = 0;
     session_open = false;
+    if (err != ESP_OK) ESP_LOGW(TAG, "Camera teardown: %s", esp_err_to_name(err));
+    return err;
 }
 
 static size_t urb_size_for_res(unsigned w, unsigned h)
@@ -489,103 +493,140 @@ static esp_err_t install_uvc_driver(void)
     return err;
 }
 
-esp_err_t board_camera_open(void)
+static esp_err_t ensure_usb_host(void)
 {
+    if (!host_installed) {
+        ESP_RETURN_ON_ERROR(init_host_phy(), TAG, "USB host PHY");
+        const usb_host_config_t host_cfg = {
+            .skip_phy_setup = true,
+            .root_port_unpowered = true,
+            .intr_flags = ESP_INTR_FLAG_LOWMED,
+        };
+        esp_err_t err = install_usb_host_on_core1(&host_cfg);
+        if (err != ESP_OK) {
+            usb_del_phy(host_phy);
+            host_phy = NULL;
+            route_phy_to_usj();
+            return err;
+        }
+        host_installed = true;
+    }
+    if (!usb_lib_task && xTaskCreatePinnedToCore(usb_lib_daemon, "uvc_usb_lib", 4096, NULL,
+                                                 USB_HOST_PRIORITY, &usb_lib_task, 1) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    return install_uvc_driver();
+}
+
+static esp_err_t wait_for_camera(board_camera_stage_t *stage)
+{
+    *stage = BOARD_CAMERA_DETECT;
+    TickType_t started = xTaskGetTickCount();
+    while (!uvc_connected && xTaskGetTickCount() - started < pdMS_TO_TICKS(ENUM_WAIT_MS)) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (uvc_connected) return ESP_OK;
+
+    usb_host_lib_info_t info;
+    esp_err_t err = usb_host_lib_info(&info);
+    if (err != ESP_OK) {
+        *stage = BOARD_CAMERA_USB_HOST;
+        return err;
+    }
+    if (info.num_devices > 0) return ESP_ERR_NOT_SUPPORTED;
+    if (!charger_dev) {
+        *stage = BOARD_CAMERA_POWER;
+        return ESP_ERR_NOT_FOUND;
+    }
+    // An external supply can also power a working camera. Only diagnose lack of
+    // boost after the enumeration window expires with an empty USB device list.
+    uint8_t status;
+    if (chg_read(REG_STATUS1, &status) == ESP_OK && (status & VBUS_STAT_MASK) != VBUS_STAT_OTG) {
+        ESP_LOGW(TAG, "No USB device, CX25601N VBUS_STAT=%u", status & VBUS_STAT_MASK);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_ERR_TIMEOUT;
+}
+
+esp_err_t board_camera_open_with_status(board_camera_stage_t *stage)
+{
+    if (!stage) return ESP_ERR_INVALID_ARG;
+    *stage = BOARD_CAMERA_INIT;
     ESP_RETURN_ON_ERROR(board_init(), TAG, "board init");
     if (!camera_lock) camera_lock = xSemaphoreCreateMutex();
-    if (!all_free_sem) all_free_sem = xSemaphoreCreateBinary();
-    if (!camera_lock || !all_free_sem) return ESP_ERR_NO_MEM;
-
+    if (!camera_lock) return ESP_ERR_NO_MEM;
     xSemaphoreTake(camera_lock, portMAX_DELAY);
     if (session_open && active_stream) {
         xSemaphoreGive(camera_lock);
         return ESP_OK;
     }
 
+    if (!all_free_sem) all_free_sem = xSemaphoreCreateBinary();
+    if (!frame_queue) frame_queue = xQueueCreate(FRAME_QUEUE_LEN, sizeof(uvc_host_frame_t *));
+    if (!all_free_sem || !frame_queue) {
+        xSemaphoreGive(camera_lock);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err;
+    if (mux_held || uvc_installed || otg_held) {
+        // Finish a previous failed disconnect before presenting a new attach.
+        err = close_camera_unlocked();
+        if (err != ESP_OK) {
+            if (active_stream) *stage = BOARD_CAMERA_STREAM;
+            else if (mux_held) *stage = BOARD_CAMERA_USB_MUX;
+            else if (uvc_installed) *stage = BOARD_CAMERA_USB_HOST;
+            else *stage = BOARD_CAMERA_POWER;
+            xSemaphoreGive(camera_lock);
+            return err;
+        }
+    }
     uvc_connected = false;
-    conn_dev_addr = 0;
-    conn_stream_idx = 0;
+    *stage = BOARD_CAMERA_POWER;
+    err = charger_set_otg(true);
+    if (err != ESP_OK) goto failed;
 
-    esp_err_t err = charger_set_otg(true);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Camera OTG power failed: %s", esp_err_to_name(err));
-        xSemaphoreGive(camera_lock);
-        return err;
-    }
-    otg_held = charger_ready;
-
-    err = board_set_usb_camera_mux(true);
-    if (err != ESP_OK) {
-        close_camera_unlocked();
-        xSemaphoreGive(camera_lock);
-        return err;
-    }
+    // IDF sends NEW_DEV only to clients registered when enumeration completes.
+    // Register UVC before connecting the mux, on both first use and retry.
+    *stage = BOARD_CAMERA_USB_HOST;
+    err = ensure_usb_host();
+    if (err != ESP_OK) goto failed;
+    *stage = BOARD_CAMERA_USB_MUX;
     mux_held = true;
+    err = board_set_usb_camera_mux(true);
+    if (err != ESP_OK) goto failed;
     vTaskDelay(pdMS_TO_TICKS(MUX_SETTLE_MS));
 
-    if (!frame_queue) {
-        frame_queue = xQueueCreate(FRAME_QUEUE_LEN, sizeof(uvc_host_frame_t *));
-        if (!frame_queue) {
-            close_camera_unlocked();
-            xSemaphoreGive(camera_lock);
-            return ESP_ERR_NO_MEM;
-        }
+    if (!root_port_powered) {
+        *stage = BOARD_CAMERA_USB_HOST;
+        err = usb_host_lib_set_root_port_power(true);
+        if (err != ESP_OK) goto failed;
+        root_port_powered = true; // Keep the root port running across scan sessions.
     }
 
-    if (!host_installed) {
-        err = init_host_phy();
-        if (err != ESP_OK) {
-            close_camera_unlocked();
-            xSemaphoreGive(camera_lock);
-            return err;
-        }
-        const usb_host_config_t host_cfg = {
-            .skip_phy_setup = true,
-            .intr_flags = ESP_INTR_FLAG_LOWMED,
-        };
-        err = install_usb_host_on_core1(&host_cfg);
-        if (err != ESP_OK) {
-            usb_del_phy(host_phy);
-            host_phy = NULL;
-            route_phy_to_usj();
-            close_camera_unlocked();
-            xSemaphoreGive(camera_lock);
-            return err;
-        }
-        host_installed = true;
-        usb_lib_running = true;
-        if (xTaskCreatePinnedToCore(usb_lib_daemon, "uvc_usb_lib", 4096, NULL,
-                                    USB_HOST_PRIORITY, &usb_lib_task, 1) != pdPASS) {
-            usb_lib_running = false;
-            close_camera_unlocked();
-            xSemaphoreGive(camera_lock);
-            return ESP_ERR_NO_MEM;
-        }
-    }
+    err = wait_for_camera(stage);
+    if (err != ESP_OK) goto failed;
 
-    err = install_uvc_driver();
-    if (err == ESP_OK) {
-        vTaskDelay(pdMS_TO_TICKS(200));
-        TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(ENUM_WAIT_MS);
-        while (!uvc_connected && xTaskGetTickCount() < deadline) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-        err = uvc_connected ? ESP_OK : ESP_ERR_TIMEOUT;
-    }
-    if (err == ESP_OK) err = open_best_mjpeg_stream();
+    *stage = BOARD_CAMERA_STREAM;
+    err = open_best_mjpeg_stream();
     if (err == ESP_OK) err = uvc_host_stream_start(active_stream);
-
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Camera open failed: %s", esp_err_to_name(err));
-        close_camera_unlocked();
-        xSemaphoreGive(camera_lock);
-        return err;
-    }
-
+    if (err != ESP_OK) goto failed;
     warmup_remaining = WARMUP_FRAMES;
     session_open = true;
     xSemaphoreGive(camera_lock);
     return ESP_OK;
+
+failed:
+    ESP_LOGW(TAG, "Camera startup stage %d: %s", (int)*stage, esp_err_to_name(err));
+    close_camera_unlocked();
+    xSemaphoreGive(camera_lock);
+    return err;
+}
+
+esp_err_t board_camera_open(void)
+{
+    board_camera_stage_t stage;
+    return board_camera_open_with_status(&stage);
 }
 
 static bool valid_jpeg_header(const uvc_host_frame_t *frame)

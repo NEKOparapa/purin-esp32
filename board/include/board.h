@@ -17,6 +17,8 @@ extern "C" {
  * 板级总线、面板、触摸资源持续到重启，不由上层删除借用句柄。
  */
 esp_err_t board_init(void);
+// Cached estimate from the BQ27220, or -1 until a valid sample is available.
+int board_battery_percent(void);
 // Save the synchronized system clock to the board's battery-backed local clock.
 esp_err_t board_clock_store(void);
 
@@ -90,9 +92,19 @@ const char *board_sdcard_path(void);
 // Run on a worker. ESP_ERR_INVALID_STATE means the card is already in use.
 esp_err_t board_sdcard_read_usage(uint64_t *total_bytes, uint64_t *free_bytes);
 
-// Powers CX25601N 5V OTG (when present), switches USB D+/D- mux to the onboard UVC camera,
-// and starts an MJPEG capture stream. Run on a worker task; close before restarting or idling.
+typedef enum {
+    BOARD_CAMERA_INIT,
+    BOARD_CAMERA_POWER,
+    BOARD_CAMERA_USB_HOST,
+    BOARD_CAMERA_USB_MUX,
+    BOARD_CAMERA_DETECT,
+    BOARD_CAMERA_STREAM,
+} board_camera_stage_t;
+
+// Opens an MJPEG stream on a worker task. Close it before restarting or idling.
 esp_err_t board_camera_open(void);
+// Also reports the startup stage that returned the error.
+esp_err_t board_camera_open_with_status(board_camera_stage_t *stage);
 // Copies the latest MJPEG frame into a newly allocated buffer (caller frees with free()).
 esp_err_t board_camera_capture_jpeg(uint8_t **jpeg_out, size_t *len_out, uint32_t timeout_ms);
 // Stops the UVC stream, switches USB mux back to debug/flash, and restores charging.

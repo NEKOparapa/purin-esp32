@@ -128,7 +128,7 @@ esp_err_t board_speaker_start(void)
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
-            .bclk = BOARD_AUDIO_SPK_BCLK_GPIO,
+            .bclk = BOARD_AUDIO_BCLK_GPIO,
             .ws = BOARD_AUDIO_MIC_WS_GPIO,
             .dout = BOARD_AUDIO_SPK_DOUT_GPIO,
             .din = I2S_GPIO_UNUSED,

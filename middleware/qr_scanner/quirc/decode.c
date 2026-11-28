@@ -403,7 +403,9 @@ struct datastream {
 	int		data_bits;
 	int		ptr;
 
-	uint8_t         data[QUIRC_MAX_PAYLOAD];
+	/* Packed codewords (including ECC) occupy at most one bit per module.
+	 * Expanded text still uses the full payload buffer in quirc_data. */
+	uint8_t         data[QUIRC_MAX_BITMAP];
 };
 
 static inline int grid_bit(const struct quirc_code *code, int x, int y)

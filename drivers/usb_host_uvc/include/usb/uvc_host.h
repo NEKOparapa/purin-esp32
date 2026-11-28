@@ -21,12 +21,6 @@
 extern "C" {
 #endif
 
-// For backward compatibility with IDF versions which do not have suspend/resume api
-#ifdef USB_HOST_LIB_EVENT_FLAGS_AUTO_SUSPEND
-/** @brief Indicates that suspend and resume events are available in this build. */
-#define UVC_HOST_SUSPEND_RESUME_API_SUPPORTED
-#endif
-
 typedef struct uvc_host_stream_s *uvc_host_stream_hdl_t; /*!< UVC stream handle. */
 
 /**
@@ -110,10 +104,10 @@ enum uvc_host_dev_event {
     UVC_HOST_DEVICE_DISCONNECTED,    /*!< Device was suddenly disconnected. The stream is stopped. */
     UVC_HOST_FRAME_BUFFER_OVERFLOW,  /*!< Frame discarded because it exceeded buffer space. */
     UVC_HOST_FRAME_BUFFER_UNDERFLOW, /*!< Frame discarded because no free buffer was available. */
-#ifdef UVC_HOST_SUSPEND_RESUME_API_SUPPORTED
+#ifdef USB_HOST_LIB_EVENT_FLAGS_AUTO_SUSPEND
     UVC_HOST_DEVICE_SUSPENDED,      /*!< Device was suspended. The stream is stopped. */
     UVC_HOST_DEVICE_RESUMED,        /*!< Device was resumed. */
-#endif // UVC_HOST_SUSPEND_RESUME_API_SUPPORTED
+#endif // USB_HOST_LIB_EVENT_FLAGS_AUTO_SUSPEND
 };
 
 /**
@@ -132,11 +126,11 @@ typedef struct {
         } frame_overflow;                      /*!< Data for UVC_HOST_FRAME_BUFFER_OVERFLOW. */
         struct {
         } frame_underflow;                     /*!< Data for UVC_HOST_FRAME_BUFFER_UNDERFLOW. */
-#ifdef UVC_HOST_SUSPEND_RESUME_API_SUPPORTED
+#ifdef USB_HOST_LIB_EVENT_FLAGS_AUTO_SUSPEND
         struct {
             uvc_host_stream_hdl_t stream_hdl;  /*!< Stream affected by suspend or resume. */
         } device_suspended_resumed;            /*!< Data for suspend and resume events. */
-#endif // UVC_HOST_SUSPEND_RESUME_API_SUPPORTED
+#endif // USB_HOST_LIB_EVENT_FLAGS_AUTO_SUSPEND
     };
 } uvc_host_stream_event_data_t;
 

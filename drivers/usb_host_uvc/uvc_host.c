@@ -140,7 +140,7 @@ static esp_err_t uvc_host_device_connected(uint8_t addr)
     return is_uvc_device ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
-#ifdef UVC_HOST_SUSPEND_RESUME_API_SUPPORTED
+#ifdef USB_HOST_LIB_EVENT_FLAGS_AUTO_SUSPEND
 
 /**
  * @brief Handler for USB device suspend event
@@ -199,7 +199,7 @@ exit:
     return ret;
 }
 
-#endif // UVC_HOST_SUSPEND_RESUME_API_SUPPORTED
+#endif // USB_HOST_LIB_EVENT_FLAGS_AUTO_SUSPEND
 
 /**
  * @brief USB Host Client event callback
@@ -237,7 +237,7 @@ static void usb_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg
         }
         break;
     }
-#ifdef UVC_HOST_SUSPEND_RESUME_API_SUPPORTED
+#ifdef USB_HOST_LIB_EVENT_FLAGS_AUTO_SUSPEND
     case USB_HOST_CLIENT_EVENT_DEV_SUSPENDED: {
         ESP_LOGD(TAG, "Device suspended");
         // Find UVC pseudo-devices associated with this USB device and deliver suspend event to the user
@@ -287,7 +287,7 @@ static void usb_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg
         }
         break;
     }
-#endif // UVC_HOST_SUSPEND_RESUME_API_SUPPORTED
+#endif // USB_HOST_LIB_EVENT_FLAGS_AUTO_SUSPEND
     default:
         assert(false);
         break;

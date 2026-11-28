@@ -35,6 +35,8 @@
 #define BOARD_I2C_PORT               I2C_NUM_0
 #define BOARD_I2C_SDA_GPIO           GPIO_NUM_41  // I2C 数据线
 #define BOARD_I2C_SCL_GPIO           GPIO_NUM_42  // I2C 时钟线
+#define BOARD_GAUGE_I2C_ADDRESS      0x55         // BQ27220 电量计的 7 位地址
+#define BOARD_GAUGE_I2C_HZ           400000
 #define BOARD_IO_EXPANDER_ADDRESS    0x20         // TCA9555 的 7 位 I2C 地址
 #define BOARD_IO_EXPANDER_I2C_HZ     100000       // 扩展器速率：100 kHz
 #define BOARD_IO_EXPANDER_INT_GPIO   GPIO_NUM_2   // TCA9555 中断输出
@@ -92,7 +94,6 @@
 #define BOARD_AUDIO_MIC_WS_GPIO      GPIO_NUM_43 // 麦克风 I2S 字选择
 #define BOARD_AUDIO_MIC_DIN_GPIO     GPIO_NUM_17 // 麦克风 I2S 数据输入
 #define BOARD_AUDIO_SPK_DOUT_GPIO    GPIO_NUM_7  // 扬声器 I2S 数据输出
-#define BOARD_AUDIO_SPK_BCLK_GPIO    BOARD_AUDIO_BCLK_GPIO // 兼容原引脚名称，实际为共用时钟
 #define BOARD_BT_AUDIO_TX_GPIO       GPIO_NUM_48 // ESP32 -> 蓝牙音频模块
 #define BOARD_BT_AUDIO_RX_GPIO       GPIO_NUM_47 // 蓝牙音频模块 -> ESP32
 #define BOARD_BT_AUDIO_UART_PORT     UART_NUM_2  // 外置音频模块模式设置串口

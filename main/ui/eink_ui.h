@@ -29,7 +29,6 @@ lv_obj_t *eink_brand_mark(lv_obj_t *parent, int size);
 lv_obj_t *eink_divider(lv_obj_t *parent, int width);
 
 /* Bespoke 1-bit circular icon medallions (46x46) for the 2x2 Home Bento tiles */
-lv_obj_t *eink_icon_chat(lv_obj_t *parent, bool on_dark_tile);
 lv_obj_t *eink_icon_calendar(lv_obj_t *parent, bool on_dark_tile);
 lv_obj_t *eink_icon_reading(lv_obj_t *parent, bool on_dark_tile);
 lv_obj_t *eink_icon_settings(lv_obj_t *parent, bool on_dark_tile);
@@ -42,9 +41,8 @@ lv_obj_t *eink_pill_button(lv_obj_t *parent, const char *text, const lv_font_t *
 lv_obj_t *eink_outline_button(lv_obj_t *parent, const char *text, const lv_font_t *font,
                               int height, lv_event_cb_t cb, void *user_data);
 
-lv_obj_t *eink_badge(lv_obj_t *parent, const char *text, const lv_font_t *font, bool filled);
-
 lv_obj_t *eink_back_button(lv_obj_t *parent, lv_event_cb_t on_back);
+lv_obj_t *eink_refresh_button(lv_obj_t *parent, lv_event_cb_t on_refresh);
 lv_obj_t *eink_top_bar(lv_obj_t *screen, const char *title, lv_event_cb_t on_back,
                        lv_obj_t **right_slot);
 
@@ -54,4 +52,3 @@ lv_obj_t *eink_top_bar_font(lv_obj_t *screen, const char *title, const lv_font_t
 lv_obj_t *eink_textarea(lv_obj_t *parent, const lv_font_t *font, int height, int radius,
                        lv_obj_t **input_out);
 void eink_style_keyboard(lv_obj_t *kb);
-void eink_style_candidates(lv_obj_t *cand, const lv_font_t *font);

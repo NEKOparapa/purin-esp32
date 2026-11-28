@@ -73,6 +73,7 @@ esp_err_t board_init(void)
     };
     ESP_RETURN_ON_ERROR(gpio_config(&boot), TAG, "BOOT button");
     board_clock_init(board_bus);
+    board_battery_init(board_bus);
     initialized = true;
     ESP_LOGI(TAG, "TCA9555: main/screen power ON, USB=debug, PA=off");
     return ESP_OK;

@@ -176,7 +176,7 @@ static void tick(lv_timer_t *timer)
     bool active = screen && lv_screen_active() == screen;
     media_result_t res;
     if (results && xQueueReceive(results, &res, 0) == pdTRUE) {
-        if (active && res.job.generation == generation) render_media(&res);
+        if (res.job.generation == generation) render_media(&res);
         cJSON_Delete(res.out);
     }
     if (!active) return;
